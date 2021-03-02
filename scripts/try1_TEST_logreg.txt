@@ -1,0 +1,18 @@
+[1] "ian j. douglas; contact: idouglas@utexas.edu"
+[1] "Today's date: 2020-11-17. Starting script today at 2020-11-17 12:43:02."
+[1] "Partition 1 created."
+[1] "Partition 2 created."
+[1] "Partition 3 created."
+[1] "Partition 4 created."
+[1] "Partition 5 created."
+[1] "Partition 6 created."
+[1] "Partition 7 created."
+[1] "Partition 8 created."
+[1] "Partition 9 created."
+[1] "Partition 10 created."
+Warning message:
+In mclapply(X = ttSplits, mc.cores = 9, FUN = function(Z) { :
+  all scheduled cores encountered errors in user code
+[1] "Done"
+[1] "Elapsed:"
+Time difference of 8.171775 secs
