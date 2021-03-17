@@ -1,0 +1,5 @@
+[1] "ian j. douglas; contact: idouglas@utexas.edu"
+[1] "Today's date: 2020-11-14. Starting script today at 2020-11-14 14:51:15."
+Error in library(MLmetrics) : there is no package called ‘MLmetrics’
+Calls: suppressMessages -> withCallingHandlers -> library
+Execution halted

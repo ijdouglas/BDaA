@@ -1,0 +1,6 @@
+[1] "ian j. douglas; contact: idouglas@utexas.edu"
+[1] "Today's date: 2020-11-18. Starting script today at 2020-11-18 11:46:48."
+Error in Residualize_noICV(.y, SB) : 
+  could not find function "Residualize_noICV"
+Calls: cbind -> imap -> map2 -> .f
+Execution halted
