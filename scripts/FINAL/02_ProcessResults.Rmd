@@ -1,0 +1,2022 @@
+---
+title: "Process Results"
+output: html_document
+---
+```{r}
+suppressPackageStartupMessages(library(tidyverse))
+library(MLmetrics)
+# Define a function to compute K-S Test statistic
+D_stat = function(y_pred, y_true) {
+  all_pred_prob = y_pred
+  pi_idx = y_true == 1
+  comp_idx = y_true == 0
+  ks_test <- suppressWarnings(ks.test(x = all_pred_prob[pi_idx],
+                                      y = all_pred_prob[comp_idx],
+                                      'less'))
+  ks_test$stat
+}
+.D_stat = function(x) {
+  all_pred_prob <- x$Observed$Model$Predictions$pred_prob
+  pi_idx = x$Observed$Model$Predictions$GROUP == 1
+  comp_idx = !pi_idx
+  ks_test <- suppressWarnings(ks.test(x = all_pred_prob[pi_idx],
+                                      y = all_pred_prob[comp_idx],
+                                      'less'))
+  ks_test$stat
+}
+# Define wrapper for function to compute earth mover's distance
+earth = function(y_pred, y_true, .p = 1) {
+  all_pred_prob = y_pred
+  pi_idx = y_true == 1
+  comp_idx = y_true == 0
+  ecdfdist(
+    elist = list(ecdf(all_pred_prob[pi_idx]), ecdf(all_pred_prob[comp_idx])),
+    method = 'Wasserstein',
+    p = .p, as.dist = T
+  )
+}
+# Define function to compute permutation teste
+permutation_test = function(y_pred, y_true, type=c("auc", "D","earth"), n, bigger.is.better) {
+  if (type=='auc') {
+    nulls <- sapply(1:n, function(i) {set.seed(i); MLmetrics::AUC(y_pred, sample(y_true))})
+    obs <- MLmetrics::AUC(y_pred, y_true)
+  } else if (type == 'D') {
+    nulls <- sapply(1:n, function(i) {set.seed(i); D_stat(y_pred, sample(y_true))})
+    obs <- D_stat(y_pred, y_true)
+  } else if (type == 'earth') {
+    nulls <- sapply(1:n, function(i) {set.seed(i); earth(y_pred, sample(y_true))})
+    obs <- earth(y_pred, y_true)
+  }
+  if (bigger.is.better) {
+    out <- (sum(nulls > obs) + 1) / (length(nulls) + 1)
+  } else {
+      out <- (sum(nulls < obs) + 1) / (length(nulls) + 1)
+  }
+  return(out)
+}
+# theme_set(theme(panel.border = element_rect(color = 'black', fill = NA, size = .9), 
+#                 panel.background = element_rect(color = 'black', fill = 'white'), 
+#                 panel.grid = element_line(color = 'lightgrey', size = .2), 
+#                 plot.background = element_rect(color = 'white', fill = 'white'), 
+#                 #axis.text.x = element_blank(), 
+#                 #axis.ticks.x = element_blank(), 
+#                 plot.title = element_text(hjust = .5, size = 36), 
+#                 plot.title.position = 'plot',
+#                 axis.text.y = element_text(size = 30),
+#                 axis.title.y = element_text(size = 33)))
+my_theme = theme(panel.border = element_rect(color = 'black', fill = NA, size = .9),
+                panel.background = element_rect(color = 'black', fill = 'white'),
+                panel.grid = element_line(color = 'lightgrey', size = .2),
+                plot.background = element_rect(color = 'white', fill = 'white'),
+                #axis.text.x = element_blank(),
+                #axis.ticks.x = element_blank(),
+                plot.title = element_text(hjust = .5, size = 36),
+                plot.title.position = 'plot',
+                axis.text.y = element_text(size = 20),
+                axis.title.y = element_text(size = 33))
+# Set up jet palette
+jet.colors <- colorRampPalette(rev(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000")))
+# Test jet pallette
+jet.colors(n = 7)
+```
+
+# Read in the results
+```{r}
+res_list = list(
+  #'GBM_onlyICV.Residualize' = readRDS('../output/SB-GBM+onlyICV-Residualize+noIFC_2021-01-10.rds'),
+  'GBM_AgeSexAdjusted' = readRDS('../output/SB-GBM_CVPVI_AgeSexAdjusted_2021-01-12.rds'),
+  'GBM_AllAdjusted' = readRDS('../output/SB-GBM_CVPVI_AllResidualized_2021-01-12.rds'),
+  'GBM_Unadjusted' = readRDS('../output/SB-GBM_CVPVI_ADJUSTNOTHING_2021-01-12.rds')
+)
+```
+
+
+# logistic regression results list:
+```{r}
+L.res_list = list(
+  #'GBM_onlyICV.Residualize' = readRDS('../output/SB-GBM+onlyICV-Residualize+noIFC_2021-01-10.rds'),
+  'GLM_AgeSexAdjusted' = readRDS('../output/SB-LogReg-CVPVI_AgeSexAdjusted_2021-01-12.rds'),
+  'GLM_AllAdjusted' = readRDS('../output/SB-LogReg-CVPVI_AllResidualized_2021-01-12.rds'),
+  'GLM_Unadjusted' = readRDS('../output/SB-LogReg-CVPVI_ADJUSTNOTHING_2021-01-12.rds')
+)
+```
+
+##  Results tables
+```{r}
+FINAL_RESULTS_TABLE <- rbind(
+  res_list %>% imap(~map(.x, function(x) {x$Observed$Model$Predictions})  %>% 
+                      reduce(rbind) %>% group_by(IDENT_SUBID, GROUP) %>% 
+                      summarize(pred_prob = mean(pred_prob)) %>% ungroup %>%
+                      {
+                        assign(paste0('FinalPredFrame_', .y), ., pos = .GlobalEnv)
+                        .
+                      } %>%
+                      summarize(D = D_stat(pred_prob, GROUP), 
+                                ROCAUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                pipeline = .y)) %>% reduce(rbind),
+  L.res_list %>% imap(~map(.x, function(x) {x$Observed$Model$Predictions})  %>%
+                        reduce(rbind) %>% group_by(IDENT_SUBID, GROUP) %>% 
+                        summarize(pred_prob = mean(pred_prob)) %>% ungroup %>%
+                        {
+                          assign(paste0('FinalPredFrame_', .y), ., pos = .GlobalEnv)
+                          .
+                        } %>%
+                        summarize(D = D_stat(pred_prob, GROUP), 
+                                  ROCAUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                  pipeline = .y)) %>% reduce(rbind)
+) %>%
+  left_join(
+    x = ., 
+    y = rbind(
+      res_list %>% imap(~map(.x, function(x) {x$Observed$Model$Predictions %>% 
+          summarize(D = D_stat(pred_prob, GROUP),
+                    rocauc = MLmetrics::AUC(pred_prob, GROUP))}) %>%
+            reduce(rbind) %>% 
+            summarize(cv_avg_D = mean(D),
+                      cv_sd_D = sd(D),
+                      cv_avg_rocauc = mean(rocauc),
+                      cv_sd_rocauc = sd(rocauc),
+                      pipeline = .y)) %>%
+        reduce(rbind),
+      L.res_list %>% imap(~map(.x, function(x) {x$Observed$Model$Predictions %>% 
+          summarize(D = D_stat(pred_prob, GROUP),
+                    rocauc = MLmetrics::AUC(pred_prob, GROUP))}) %>%
+            reduce(rbind) %>% 
+            summarize(cv_avg_D = mean(D),
+                      cv_sd_D = sd(D),
+                      cv_avg_rocauc = mean(rocauc),
+                      cv_sd_rocauc = sd(rocauc),
+                      pipeline = .y)) %>%
+        reduce(rbind)
+    ),
+    by= 'pipeline'
+)
+view(FINAL_RESULTS_TABLE)
+saveRDS(FINAL_RESULTS_TABLE, "../results/final_results_tbl.rds")
+write.csv(FINAL_RESULTS_TABLE, "../results/final_results_tbl.csv", row.names = F)
+```
+
+CVPVI
+```{r}
+process_cvpvi = function(the_results) 
+{
+  the_results %>% 
+    lapply(function(res) {
+      map_dfr(res, ~cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID', 'GROUP', 'pred_prob')], 
+                          .x$Observed$CVPVI )) %>%
+        group_by(IDENT_SUBID, GROUP) %>%
+        summarize_all(mean) %>% ungroup %>%
+        pivot_longer(cols = -1:-3, names_to = 'Variable', values_to = 'data') %>%
+        group_by(Variable) %>%
+        mutate(True_D_stat = D_stat(pred_prob, GROUP), True_ROCAUC = MLmetrics::AUC(pred_prob, GROUP)) %>%
+        group_by(True_D_stat, True_ROCAUC, Variable) %>%
+        summarize(D_stat = D_stat(data, GROUP), ROCAUC = MLmetrics::AUC(data, GROUP)) %>%
+        ungroup %>%
+        mutate(
+          CVPVI.D.Pct = (1 - (D_stat/True_D_stat))*100,
+          CVPVI.D.Diff = True_D_stat - D_stat,
+          CVPVI.ROCAUC.Pct = (1 - (ROCAUC/True_ROCAUC))*100,
+          CVPVI.ROCAUC.Diff = True_ROCAUC - ROCAUC
+        )
+    })
+}
+res_cvpvi <- process_cvpvi(res_list) %>% setNames(nm = names(res_list))
+L.res_cvpvi <- process_cvpvi(L.res_list) %>% setNames(nm = names(L.res_list))
+
+ALL_CVPVI_tbl <- rbind(imap_dfr(res_cvpvi, ~.x %>% mutate(pipeline = .y)),
+                       imap_dfr(L.res_cvpvi, ~.x %>% mutate(pipeline = .y)))
+saveRDS(ALL_CVPVI_tbl, "../results/CVPVI_tbl.rds")
+view(ALL_CVPVI_tbl)
+ALL_CVPVI_tbl <- readRDS("../results/CVPVI_tbl.rds")
+```
+
+Chi-Sq tests for 
+Permutation pvalues for the CVPVI
+```{r}
+cvpvi_permutation_test = function(the_results, perms) 
+{
+  the_results %>% 
+    lapply(function(res) {
+      averages <- map_dfr(res, ~cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID', 'GROUP', 'pred_prob')], 
+                          .x$Observed$CVPVI)) %>%
+        group_by(IDENT_SUBID, GROUP) %>%
+        summarize_all(mean) %>% ungroup
+      # pred_prob is the TRUE predicted probabilities
+      # Each column named for a brain region is the vector of probs made when those were permuted
+      nullFrame <- mclapply(X=1:perms, mc.cores = 3, FUN=function(i) {
+        set.seed(i)
+        null_GROUP = sample(averages$GROUP)
+        null_rocauc_cvpvi = averages %>% 
+          summarize_at(vars(pred_prob, starts_with(match = c('L.', 'R.'))), 
+                       .funs = ~MLmetrics::AUC(., null_GROUP))
+        null_D_cvpvi = averages %>% 
+          summarize_at(vars(pred_prob, starts_with(match = c('L.', 'R.'))), 
+                       .funs = ~D_stat(., null_GROUP))
+        rbind(null_rocauc_cvpvi, null_D_cvpvi)
+      }) %>% reduce(rbind) %>% mutate(metric = rep(c('rocauc', 'D'), length.out=nrow(.))) %>%
+        dplyr::select(metric, pred_prob, everything())
+      mclapply(X=nullFrame %>% dplyr::select(starts_with(c('L.','R.'))),
+               mc.cores = 3,
+               FUN=function(x) (1 - (as.vector(x) / nullFrame$pred_prob))*100) %>%
+        reduce(cbind) %>%
+        cbind(nullFrame[1:2], .) %>% remove_rownames() %>%
+        setNames(nm = names(nullFrame))
+    })
+}
+permtest_1000 <- cvpvi_permutation_test(res_list, 1000)
+L.permtest_1000 <- cvpvi_permutation_test(L.res_list, 1000)
+saveRDS(list('GBM'=permtest_1000,'GLM'=L.permtest_1000),
+        "../output/cvpvi_permutation_tests_BOTH-MODELTYPES.rds")
+pvals <- imap_dfr(permtest_1000, ~{
+  true_cvpvi = ALL_CVPVI_tbl %>%
+    filter(pipeline %in% .y)
+  nulls_rocauc = .x %>% filter(metric == 'rocauc') %>% dplyr::select(-1:-2)
+  nulls_D = .x %>% filter(metric == 'D') %>% dplyr::select(-1:-2)
+  rocauc_pvals = imap_dfr(nulls_rocauc, function(X, Y) {
+    true_val <- true_cvpvi$CVPVI.ROCAUC.Pct[true_cvpvi$Variable == Y]
+    data.frame(Variable = Y, metric = 'rocauc', p = (sum(true_val < X) + 1) / ((length(X))+ 1), 
+               stringsAsFactors = F)
+  })
+  D_pvals = imap_dfr(nulls_D, function(X, Y) {
+    true_val <- true_cvpvi$CVPVI.D.Pct[true_cvpvi$Variable == Y]
+    data.frame(Variable = Y, metric = 'D', p = (sum(true_val < X) + 1) / ((length(X))+ 1), 
+               stringsAsFactors = F)
+  })
+  rbind(rocauc_pvals, D_pvals) %>% mutate(pipeline = .y)
+})
+L.pvals <- imap_dfr(L.permtest_1000, ~{
+  true_cvpvi = ALL_CVPVI_tbl %>%
+    filter(pipeline %in% .y)
+  nulls_rocauc = .x %>% filter(metric == 'rocauc') %>% dplyr::select(-1:-2)
+  nulls_D = .x %>% filter(metric == 'D') %>% dplyr::select(-1:-2)
+  rocauc_pvals = imap_dfr(nulls_rocauc, function(X, Y) {
+    true_val <- true_cvpvi$CVPVI.ROCAUC.Pct[true_cvpvi$Variable == Y]
+    data.frame(Variable = Y, metric = 'rocauc', p = (sum(true_val < X) + 1) / ((length(X))+ 1), 
+               stringsAsFactors = F)
+  })
+  D_pvals = imap_dfr(nulls_D, function(X, Y) {
+    true_val <- true_cvpvi$CVPVI.D.Pct[true_cvpvi$Variable == Y]
+    data.frame(Variable = Y, metric = 'D', p = (sum(true_val < X) + 1) / ((length(X))+ 1), 
+               stringsAsFactors = F)
+  })
+  rbind(rocauc_pvals, D_pvals) %>% mutate(pipeline = .y)
+})
+saveRDS(rbind(pvals, L.pvals), "../output/all_permutation_pvals_BOTH-MODELTYPES.rds")
+write.csv(rbind(pvals, L.pvals), "../output/all_permutation_pvals_BOTH-MODELTYPES.csv", row.names = F)
+
+# Get the perm p vals for the models while at it
+model_pvals = sapply(FINAL_RESULTS_TABLE$pipeline, function(x) {
+  if (x %in% names(permtest_1000)) {
+    nulls <- permtest_1000[[x]] %>% filter(metric == 'rocauc') %>% .$pred_prob
+  } else nulls <- L.permtest_1000[[x]] %>% filter(metric == 'rocauc') %>% .$pred_prob
+  obs <- FINAL_RESULTS_TABLE$ROCAUC[FINAL_RESULTS_TABLE$pipeline == x]
+  (sum(obs < nulls) + 1) / (length(nulls) + 1)
+}) %>% data.frame(pipeline=FINAL_RESULTS_TABLE$pipeline, p = ., stringsAsFactors = F)
+saveRDS(model_pvals, "../results/ModelPerformancePermPvals.rds")
+write.csv(model_pvals, "../results/ModelPerformancePermPvals.csv", row.names = F)
+
+# Same for the D stat
+model_pvals_D = sapply(FINAL_RESULTS_TABLE$pipeline, function(x) {
+  if (x %in% names(permtest_1000)) {
+    nulls <- permtest_1000[[x]] %>% filter(metric == 'D') %>% .$pred_prob
+  } else nulls <- L.permtest_1000[[x]] %>% filter(metric == 'D') %>% .$pred_prob
+  obs <- FINAL_RESULTS_TABLE$D[FINAL_RESULTS_TABLE$pipeline == x]
+  (sum(obs < nulls) + 1) / (length(nulls) + 1)
+}) %>% data.frame(pipeline=FINAL_RESULTS_TABLE$pipeline, p = ., stringsAsFactors = F)
+```
+
+CVPVI plot
+```{r}
+# Get the p values, and give htem the names of the cvpvi from the cvpvi table.
+pval_tbl = rbind(pvals, L.pvals) %>%
+  pivot_wider(id_cols = c('Variable', 'pipeline'), names_from = metric, values_from = p) %>%
+  rename_at(vars(-Variable,-pipeline), ~paste("CVPVI", toupper(.), "pvalue", sep = "."))
+# Collect the null distr for each variable, and (as above, put into wide for rocauc and d)
+auc_nulls_for_plt = rbind(
+  imap_dfr(permtest_1000, ~.x %>% mutate(pipeline=.y)),
+  imap_dfr(L.permtest_1000, ~.x %>% mutate(pipeline = .y))
+) %>%
+  select(-pred_prob) %>% # not needed
+  pivot_longer(cols = matches(c('^L\\.', "R\\.")), values_to = "nulls", names_to = 'Variable') %>%
+  group_by(metric, pipeline, Variable) %>%
+  mutate(null_iter = 1:n()) %>% ungroup %>%
+  pivot_wider(id_cols = c(Variable, pipeline, null_iter), 
+              names_from = metric, values_from = nulls, names_prefix = 'nulls_') %>%
+  select(nulls_d = nulls_D, everything()) %>%
+  select(-null_iter) %>%
+  mutate(model = sub('_.+$','', pipeline),
+         preproc = factor(sub('G.M_', '', pipeline), 
+                          levels = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted"))) %>%
+  select(-pipeline)
+  
+  
+cvpvi.pltDat <- ALL_CVPVI_tbl %>%
+  dplyr::select(Variable, pipeline, starts_with('CVPVI')) %>%
+  # DROP THE DIFF-BASED METRIC FOR NOW, (will make averageing better below)
+  dplyr::select(-contains('Diff')) %>%
+  pivot_longer(starts_with('CVPVI'), names_to = 'metric', values_to = 'data') %>%
+  # Make a course "global" average across rocauc and D-based EI
+  group_by(Variable) %>%
+  mutate(global_avg = mean(data)) %>%
+  ungroup %>%
+  pivot_wider(id_cols = c('Variable', 'pipeline', 'global_avg'), 
+              names_from = metric, values_from = data) %>%
+  # Merging in the pvalues
+  left_join(., pval_tbl, by = c('Variable', 'pipeline')) %>%
+  mutate(sig_rocauc = case_when(
+    CVPVI.ROCAUC.pvalue < .10 & CVPVI.ROCAUC.pvalue >= .05 ~ "p < .10",
+    CVPVI.ROCAUC.pvalue < .05 & CVPVI.ROCAUC.pvalue >= .01 ~ "p < .05",
+    CVPVI.ROCAUC.pvalue < .01 & CVPVI.ROCAUC.pvalue >= .0001 ~ "p < .01",
+    CVPVI.ROCAUC.pvalue < .001 ~ "p < .001"),
+    sig_d = case_when(
+      CVPVI.D.pvalue < .10 & CVPVI.D.pvalue >= .05 ~ "p < .10",
+      CVPVI.D.pvalue < .05 & CVPVI.D.pvalue >= .01 ~ "p < .05",
+      CVPVI.D.pvalue < .01 & CVPVI.D.pvalue >= .0001 ~ "p < .01",
+      CVPVI.D.pvalue < .001 ~ "p < .001")) %>%
+  arrange(desc(global_avg)) %>%
+  mutate(model = sub('_.+$','', pipeline),
+         preproc = factor(sub('G.M_', '', pipeline), 
+                          levels = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted")))
+
+# Now add any variables not in auc_nulls* that are in cvpvi.pltDat to auc_nulls* and rbind
+auc_nulls_for_plt = left_join(auc_nulls_for_plt, cvpvi.pltDat[0,], 
+                              by = intersect(names(auc_nulls_for_plt), names(cvpvi.pltDat)))
+cvpvi.pltDat = left_join(cvpvi.pltDat, auc_nulls_for_plt[0,], 
+                         by = intersect(names(auc_nulls_for_plt), names(cvpvi.pltDat)))
+cvpvi.pltDat = rbind(cvpvi.pltDat, auc_nulls_for_plt) %>%
+  arrange(desc(global_avg)) %>%
+  mutate_at('Variable', ~factor(., levels = rev(unique(.)))) %>%
+  ungroup
+```
+```{r}
+# rocauc-stat based
+ggplot(cvpvi.pltDat, aes(y = Variable)) +
+  geom_vline(aes(xintercept = 0), linetype = 2, color = '#838383') +
+  # geom_linerange(aes(xmin = nulls_min, xmax = nulls_max, y = Variable),
+  #                color = 'red', size = 2) +
+  geom_jitter(aes(x = nulls_rocauc), color = 'grey', alpha = .05, height = .05) +
+  geom_segment(aes(y = Variable, x = CVPVI.ROCAUC.Pct, xend = 0, yend = Variable)) +
+  # geom_point(aes(x = CVPVI.D.Pct, fill = preproc, size = 1-p),
+  #            shape = 21, color = 'black') +
+  geom_point(aes(x = CVPVI.ROCAUC.Pct, fill = preproc, alpha = 1 - CVPVI.ROCAUC.pvalue),
+             shape = 21, color = 'black', size = 6, stroke = 1.5) +
+  geom_point(aes(x=CVPVI.ROCAUC.Pct + 5, shape = sig_rocauc), size = 3, stroke = 2, fill=NA) +
+  facet_grid(rows = vars(model), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted")))) +
+  my_theme +
+  theme(axis.title.x = element_text(size = 24)) +
+  theme(strip.text = element_text(size = 30)) +
+  theme(axis.text.x = element_text(size = 20)) +
+  scale_fill_manual(values = jet.colors(5)[c(2, 4, 3)],
+                     labels = c('None','Age, Sex', 'Age, Sex, ICV')) +
+  scale_shape_manual(values = c(8, 3, 18), na.translate = F) +
+  scale_alpha_continuous(breaks = c(.05, .5, .95), labels = c(.95, .5, .05)) +
+  guides(fill = guide_legend(title.theme = element_text(size = 26),
+                             label.theme = element_text(size = 24),
+                             title = 'Covariates',
+                             override.aes = list(size = 4)),
+         alpha = guide_legend(reverse = T,
+                              title = 'p',
+                              title.theme = element_text(size = 26),
+                              label.theme = element_text(size = 24),
+                              override.aes = list(fill = 'black')),
+         shape = guide_legend(title.theme = element_blank(),
+                              label.theme = element_text(size = 24),
+                              override.aes = list(size = 3))) +
+  xlab('%-change in model performance (ROCAUC) associated with adding each variable to model') +
+  ggtitle("Cross-Validated Ensemble Importance for Brain Volume Variable")
+ggsave("../results/CVPVI_ROCAUC_Plot.jpg", device="jpg", units = 'in',
+       height = 12, width = 22)
+# D-stat based
+ggplot(cvpvi.pltDat, aes(y = Variable)) +
+  geom_vline(aes(xintercept = 0), linetype = 2, color = '#838383') +
+  # geom_linerange(aes(xmin = nulls_min, xmax = nulls_max, y = Variable),
+  #                color = 'red', size = 2) +
+  geom_jitter(aes(x = nulls_d), color = 'grey', alpha = .05, height = .05) +
+  geom_segment(aes(y = Variable, x = CVPVI.D.Pct, xend = 0, yend = Variable)) +
+  # geom_point(aes(x = CVPVI.D.Pct, fill = preproc, size = 1-p),
+  #            shape = 21, color = 'black') +
+  geom_point(aes(x = CVPVI.D.Pct, fill = preproc, alpha = 1 - CVPVI.D.pvalue),
+             shape = 21, color = 'black', size = 6, stroke = 1.5) +
+  geom_point(aes(x=CVPVI.D.Pct + 5, shape = sig_d), size = 3, stroke = 2, fill = NA) +
+  facet_grid(rows = vars(model), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted")))) +
+  my_theme +
+  theme(axis.title.x = element_text(size = 24)) +
+  theme(strip.text = element_text(size = 30)) +
+  theme(axis.text.x = element_text(size = 20)) +
+  scale_x_continuous(limits = c(-50, max(ALL_CVPVI_tbl$CVPVI.D.Pct))) +
+  scale_fill_manual(values = jet.colors(5)[c(2, 4, 3)],
+                     labels = c('None','Age, Sex', 'Age, Sex, ICV')) +
+  scale_shape_manual(values = c(8, 3, 18), na.translate = F) +
+  scale_alpha_continuous(breaks = c(.05, .5, .95), labels = c(.95, .5, .05)) +
+  guides(fill = guide_legend(title.theme = element_text(size = 26),
+                             label.theme = element_text(size = 24),
+                             title = 'Covariates',
+                             override.aes = list(size = 4)),
+         alpha = guide_legend(reverse = T,
+                              title = 'p',
+                              title.theme = element_text(size = 26),
+                              label.theme = element_text(size = 24),
+                              override.aes = list(fill = 'black')),
+         shape = guide_legend(title.theme = element_blank(),
+                              label.theme = element_text(size = 24),
+                              override.aes = list(size = 3))) +
+  xlab('%-change in D-statistic magnitude associated with adding each variable to model') +
+  ggtitle("Cross-Validated Ensemble Importance for Brain Volume Variable")
+ggsave("../results/CVPVI_D-stat_Plot.jpg", device="jpg", units = 'in',
+       height = 12, width = 22)
+```
+
+
+# Read in the bootstrapped averaged results
+```{r}
+boot_res <- readRDS("../output/BOOTSTRAP_CVPVI-PIPELINE_2021-01-12.rds") %>%
+  # unpack the results so they have the same variables as the data that are plotted
+  mutate(preproc = sub("G.M_", '', x_axis),
+         model = str_extract(x_axis, "G.M"),
+         x_axis = paste(model, preproc, sep= '_'))
+  
+boot_res = list(
+  'rocauc' = dplyr::select(boot_res, model, preproc, rocauc, x_axis),
+  'D_stat' = dplyr::select(boot_res, model, preproc, D_stat, x_axis)
+)
+```
+
+
+# Set up regular expression keys to pluck the desired results from either results
+```{r}
+keys <- names(res_list) %>% sub(pattern = "^G.M_", replacement = "", x = .)
+keys
+```
+
+# Collect and save the averaged performance from each model set
+```{r, message=FALSE, results='hide'}
+average_prediction_frames <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup
+  rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(pipeline = paste(model, preproc, sep = '_')) %>%
+  select(pipeline, model, preproc, everything()) %>%
+  group_by(pipeline) %>%
+  mutate(ROCAUC = MLmetrics::AUC(pred_prob, GROUP),
+         D_stat = D_stat(pred_prob, GROUP),
+         Earth.Dist = earth(pred_prob, GROUP, .p = 1)) %>%
+  mutate(pvalue_ROCAUC = permutation_test(pred_prob, GROUP, type="auc", 1000, TRUE),
+         pvalue_D_stat = permutation_test(pred_prob, GROUP, type="D", 1000, TRUE),
+         pvalue_Earth.Dist = permutation_test(pred_prob, GROUP, type="earth", 1000, TRUE)) %>%
+  ungroup
+saveRDS(average_prediction_frames, "../averagedPredictionFrames.rds")
+write.csv(average_prediction_frames, "../averagedPredictionFrames.csv", row.names = F)
+```
+
+
+#eCDF
+```{r}
+ecdf.pltDat = map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', list(tmp = ~mean(., na.rm = T), 
+                                   SE = ~sd(., na.rm = T)/sqrt(length(.)))) %>% ungroup %>%
+    select(pred_prob = tmp, everything())
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', list(tmp = ~mean(., na.rm = T), 
+                                   SE = ~sd(., na.rm = T)/sqrt(length(.)))) %>% ungroup %>%
+    select(pred_prob = tmp, everything())
+  rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(pipeline = paste(model, preproc, sep = '_')) %>%
+  select(pipeline, model, preproc, everything())
+```
+```{r}
+ecdf.pltDat %>%
+  arrange(pred_prob) %>%
+  #mutate_at('IDENT_SUBID', ~factor(., levels = unique(.))) %>%
+  group_by(GROUP, pipeline) %>%
+  mutate(rank_id = dense_rank(pred_prob) / n()) %>% ungroup %>%
+  mutate_at(vars(GROUP), ~factor(c("Comp", "PI")[. + 1], levels = c("PI", "Comp"))) %>%
+  mutate_at(vars(pipeline, preproc), ~case_when(
+    grepl("Unadjusted$", .) ~ sub("[[:punct:]]", "", sub("Unadjusted", ": No Covariates", .)),
+    grepl("AllAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AllAdjusted", ": All Covariates", .)),
+    grepl("AgeSexAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AgeSexAdjusted", ": Age, Sex Controlled", .))
+  )) %>%
+  ggplot(aes(color = pred_prob)) +
+  geom_segment(aes(x = pred_prob - 1.96*SE, xend = pred_prob + 1.96*SE, 
+                   y = rank_id, yend = rank_id),
+               size = 2.2) +
+  scale_color_gradientn(colours = jet.colors(14)) +
+  facet_grid(rows = vars(model, GROUP), cols = vars(preproc)) +
+  geom_point(aes(x = pred_prob, y = rank_id), color = 'black', fill = 'darkgrey', shape = 21, alpha = .6) +
+  my_theme +
+  theme(axis.text.y = element_text(size = 14)) +
+  theme(axis.text.x = element_text(size = 16)) +
+  theme(strip.text = element_text(size = 18)) +
+  theme(axis.title.x = element_text(size = 20)) +
+  guides(color = guide_colorbar(title = 'Probability',
+                                title.theme = element_text(size= 20),
+                                label.theme = element_text(size= 16),
+                                barwidth = 3, barheight = 12)) +
+  ggtitle("Predicted Probabilities of Early-Life Institutional Care for each Group, from each Model") +
+  xlab('Probability') +
+  ylab('Cumalitive Distribution')
+ggsave("../results/ecdf_plot.jpg", device = 'jpg', units = 'in', height = 10, width = 22)
+```
+
+
+
+# Distribution of AUC for each model fit with the different training samples
+```{r}
+within_fold_performance <- map_dfr(keys, .f = ~{
+  gbm <- sapply(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Scores$test_ROCAUC)
+  glm <- sapply(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Scores$test_ROCAUC)
+  rbind(data.frame(model = 'GBM', preproc = .x, rocauc = gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, rocauc = glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+# And the actual, averaged resuls
+average_performance <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_rocauc = MLmetrics::AUC(pred_prob, GROUP))
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_rocauc = MLmetrics::AUC(pred_prob, GROUP))
+  rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+saveRDS(list(
+  'within' = within_fold_performance,
+  'averaged' = average_performance
+), '../results/within_and_averaged_performance.rds')
+```
+
+
+# Within fold D stat (ks.test) assessing CDF for each group
+Within fold D-stat
+THE D STATISTIC WILL TEST THAT THE CDF FOR PI GROUP IS BELOW (LESS) THAN CONTROLS
+BECAUSE THE HIGHER PROBABILITIES OCCUR LATER ALONG THE DOMAIN OF THE PREDICTED
+PROBABILITIES RANGING FROM 0 TO 1, SO WE HYPOTHESIZE THAT LOWER CDF VALUES WILL
+OCCUR FOR THE PI FOR HIGHER VALUES OF PDF (PREDICTED PROBABILITIES).
+```{r}
+within_fold_D_stat <- map_dfr(keys, .f = ~{
+  gbm <- sapply(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) .D_stat(x))
+  glm <- sapply(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) .D_stat(x))
+  rbind(data.frame(model = 'GBM', preproc = .x, D_stat = gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, D_stat = glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+
+# And the actual, averaged resuls
+average_D_stat <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_D_stat = D_stat(pred_prob, GROUP))
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_D_stat = D_stat(pred_prob, GROUP))
+  rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+saveRDS(list(
+  'within' = within_fold_D_stat,
+  'averaged' = average_D_stat
+), '../results/within_and_averaged_D_stat.rds')
+```
+
+Earth movers distance results
+```{r}
+within_fold_earth <- map_dfr(keys, .f = ~{
+  gbm <- sapply(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) earth(y_pred = x$Observed$Model$Predictions$pred_prob,
+                                  y_true = x$Observed$Model$Predictions$GROUP))
+  glm <- sapply(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) earth(y_pred = x$Observed$Model$Predictions$pred_prob,
+                                  y_true = x$Observed$Model$Predictions$GROUP))
+  rbind(data.frame(model = 'GBM', preproc = .x, earth = gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, earth = glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+
+# And the actual, averaged resuls
+average_earth <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_earth = earth(pred_prob, GROUP))
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup %>%
+    summarize(avg_earth = earth(pred_prob, GROUP))
+  rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
+        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+    remove_rownames()
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+saveRDS(list(
+  'within' = within_fold_earth,
+  'averaged' = average_earth
+), '../results/within_and_averaged_earth.rds')
+```
+
+
+# Permutation tests
+For each vector of averaged predicted probabilities, compute ROCAUC and K-S stat 1000 times using unique random group label vectors.
+```{r}
+# ROCAUC (performance)
+null_performance <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup
+  gbm <- sapply(1:1000, function(x) {
+    set.seed(x); MLmetrics::AUC(y_pred = gbm$pred_prob, sample(gbm$GROUP))
+  })
+  
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup
+  glm <- sapply(1:1000, function(x) {
+    set.seed(x); MLmetrics::AUC(y_pred = glm$pred_prob, sample(glm$GROUP))
+  })
+  
+  data.frame(nulls = c(gbm, glm)) %>% remove_rownames() %>%
+    mutate(model = rep(c('GBM','GLM'), each = 1000), preproc = .x)
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+# D stat
+null_D_stat <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup 
+  gbm <- sapply(1:1000, function(x) {
+    set.seed(x); D_stat(y_pred = gbm$pred_prob, sample(gbm$GROUP))
+  })
+  
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup 
+  glm <- sapply(1:1000, function(x) {
+    set.seed(x); D_stat(y_pred = glm$pred_prob, sample(glm$GROUP))
+  })
+  
+  data.frame(nulls = c(gbm, glm)) %>% remove_rownames() %>%
+    mutate(model = rep(c('GBM','GLM'), each = 1000), preproc = .x)
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+# Earth mover distance
+null_earth <- map_dfr(keys, .f = ~{
+  gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup 
+  gbm <- sapply(1:1000, function(x) {
+    set.seed(x); D_stat(y_pred = gbm$pred_prob, sample(gbm$GROUP))
+  })
+  
+  glm <- map_dfr(pluck(L.res_list, paste0('GLM_', .x)),
+                function(x) x$Observed$Model$Predictions) %>%
+    as.data.frame %>%
+    group_by(IDENT_SUBID, GROUP) %>%
+    summarise_at('pred_prob', ~mean(., na.rm = T)) %>% ungroup 
+  glm <- sapply(1:1000, function(x) {
+    set.seed(x); D_stat(y_pred = glm$pred_prob, sample(glm$GROUP))
+  })
+  
+  data.frame(nulls = c(gbm, glm)) %>% remove_rownames() %>%
+    mutate(model = rep(c('GBM','GLM'), each = 1000), preproc = .x)
+}) %>%
+  mutate(x_axis = paste(model, preproc, sep = '_'))
+
+saveRDS(list(
+  'ROCAUC' = null_performance,
+  'D_stat' = null_D_stat
+),"../results/null_model_stats.rds")
+```
+
+
+```{r}
+model_pvals = map_dfr(paste(rep(c('GBM','GLM'), each = 3), keys, sep='_'), ~{
+  .nulls_perf <- null_performance %>%
+    filter(x_axis == .x) %>% .$nulls
+  .obs_perf <- FINAL_RESULTS_TABLE$ROCAUC[FINAL_RESULTS_TABLE$pipeline == .x]
+  .nulls_d <- null_D_stat %>%
+    filter(x_axis == .x) %>% .$nulls
+  .obs_d <- FINAL_RESULTS_TABLE$D[FINAL_RESULTS_TABLE$pipeline == .x]
+  p_perf = (sum(.nulls_perf > .obs_perf) + 1) / (length(.nulls_perf) + 1)
+  p_d = (sum(.nulls_d > .obs_d) + 1) / (length(.nulls_d) + 1)
+  list(p_rocauc = p_perf, p_D_stat = p_d, 
+       model = str_extract(.x, 'G.M'), 
+       preproc = sub("G.M_", "", .x), 
+       x_axis = .x)
+})
+saveRDS(model_pvals, "../results/model_perm_pvalues.rds")
+```
+
+# Plots of both
+## ROCAUC plots
+```{r}
+performance.pltDat <- within_fold_performance %>%
+  mutate('Results_type' = 'Individual CV-Fold Results') %>%
+  # Merge in the bootstrap performance
+  rbind(., boot_res[['rocauc']] %>% mutate('Results_type' = 'Averaged Results')) %>%
+  left_join(., average_performance %>% dplyr::select(avg_rocauc, x_axis), by = 'x_axis') %>%
+  mutate(boot_rocauc = ifelse(Results_type == 'Averaged Results', rocauc, NA),
+         i_rocauc = replace(rocauc, Results_type == 'Averaged Results', NA),
+         ALL_rocauc = ifelse(Results_type == 'Averaged Results', avg_rocauc, rocauc)) %>%
+  mutate_at('preproc', ~factor(., levels = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted"))) #%>%
+# Concatenate with the null distributions
+performance.pltDat <- rbind(
+  cbind(arrange(performance.pltDat%>%filter(!is.na(boot_rocauc)), x_axis), 
+        arrange(null_performance[c("nulls", "x_axis")], x_axis) %>% select(-x_axis)),
+  performance.pltDat %>% filter(is.na(boot_rocauc)) %>% mutate(nulls = NA_real_)
+)
+  # merge(
+  #   x = .,
+  #   y = null_performance %>% select(x_axis, nulls) %>% mutate(Results_type = 'Averaged Results'),
+  #   by = c('x_axis', 'Results_type'),
+  #   all.x = T, all.y = F
+  # )
+  # {
+  #   assign("performance.pltDat", ., pos = .GlobalEnv)
+  #   .
+  # } %>%
+```
+```{r}
+# Plot
+ggplot(performance.pltDat, aes(x = model)) +
+  # Layer 1 are boxplots for both averaged and individual
+  geom_boxplot(aes(y = i_rocauc), size = 2, color = 'black') + 
+  geom_boxplot(aes(y = boot_rocauc), size = 2, color = 'black') +
+  # Null distributions
+  geom_jitter(aes(y = nulls), shape = 21, color = '#838383', fill='white', # dark, dark grey 
+              alpha = .5, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = nulls),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # The jitters for the bootstraps, plus the linerange/errorbar
+  geom_jitter(aes(y = boot_rocauc, color = preproc, shape = model), fill = 'white', 
+              alpha = .3, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = boot_rocauc),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Add the jitters and errorband for the individual-fold results
+  geom_jitter(aes(y = i_rocauc, color = preproc, shape = model), fill = 'white',
+              width = .15, size = 3.2, stroke = 2.2, alpha = .5) +
+  stat_summary(inherit.aes = T, aes(y = i_rocauc),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Facetting
+  facet_grid(rows = vars(Results_type), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = sort(unique(performance.pltDat$preproc))),
+    .rows = setNames(
+      object = c('Averaged Results (w/in Bootstrap CI)','Individual Results (w/in C.V. error interval)'),
+      nm = c('Averaged Results','Individual CV-Fold Results')))) +
+  # Relabelling the legends
+  scale_shape_manual(values = c(22, 23), labels = c('GBM','GLM')) +
+  guides('shape' = guide_legend(title = 'Model Type',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  scale_color_manual(values = jet.colors(5)[c(2, 4, 3)],
+                     labels = c('None','Age, Sex', 'Age, Sex, ICV')) +
+  guides('color' = guide_legend(title = 'Covariates\nControlled',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  # apply the theme defined in the first code chunk of this .Rmd
+  my_theme +
+  # FINAL LAYER: average for each the bootstraps (is really the averaged result)
+  # and the mean of the individual fold results
+  # Add the point for each mean (since boxplot demarcates median)
+  stat_summary(aes(y = ALL_rocauc), inherit.aes = T, fun = mean, geom = 'point',
+               shape = 21, size = 4, fill = 'white', color = 'black', stroke = 3) +
+  theme(
+    strip.text.x = element_text(size = 24),
+    strip.text.y = element_text(size = 20),
+    axis.text.x = element_text(size = 24),
+    axis.title.x = element_text(size = 28)
+  ) +
+  xlab('Model Type') + ylab('ROCAUC')
+ggsave("../results/PerformancePlotFinal.jpg", device = 'jpg', units = 'in',
+       width = 11*1.7, height = 8*1.7)
+```
+
+## Plots for the D stat
+```{r}
+D_stat.pltDat <- within_fold_D_stat %>%
+  mutate('Results_type' = 'Individual CV-Fold Results') %>%
+  # Merge in the bootstrap performance
+  rbind(., boot_res[['D_stat']] %>% mutate('Results_type' = 'Averaged Results')) %>%
+  left_join(., average_D_stat %>% dplyr::select(avg_D_stat, x_axis), by = 'x_axis') %>%
+  mutate(boot_D_stat = ifelse(Results_type == 'Averaged Results', D_stat, NA),
+         i_D_stat = replace(D_stat, Results_type == 'Averaged Results', NA),
+         ALL_D_stat = ifelse(Results_type == 'Averaged Results', avg_D_stat, D_stat)) %>%
+  mutate_at('preproc', ~factor(., levels = c("Unadjusted", "AgeSexAdjusted", "AllAdjusted"))) #%>%
+# Concatenate with the null distributions
+D_stat.pltDat <- rbind(
+  cbind(arrange(D_stat.pltDat%>%filter(!is.na(boot_D_stat)), x_axis), 
+        arrange(null_D_stat[c("nulls", "x_axis")], x_axis) %>% select(-x_axis)),
+  D_stat.pltDat %>% filter(is.na(boot_D_stat)) %>% mutate(nulls = NA_real_)
+)
+```
+```{r}
+ggplot(D_stat.pltDat, aes(x = model)) +
+  # Layer 1 are boxplots for both averaged and individual
+  geom_boxplot(aes(y = i_D_stat), size = 2, color = 'black') + 
+  geom_boxplot(aes(y = boot_D_stat), size = 2, color = 'black') +
+  # Null distributions
+  geom_jitter(aes(y = nulls), shape = 21, color = '#838383', fill='white', # dark, dark grey 
+              alpha = .5, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = nulls),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # The jitters for the bootstraps, plus the linerange/errorbar
+  geom_jitter(aes(y = boot_D_stat, color = preproc, shape = model), fill = 'white', 
+              alpha = .3, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = boot_D_stat),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Add the jitters and errorband for the individual-fold results
+  geom_jitter(aes(y = i_D_stat, color = preproc, shape = model), fill = 'white',
+              width = .15, size = 3.2, stroke = 2.2, alpha = .5) +
+  stat_summary(inherit.aes = T, aes(y = i_D_stat),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Facetting
+  facet_grid(rows = vars(Results_type), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = sort(unique(performance.pltDat$preproc))),
+    .rows = setNames(
+      object = c('Averaged Results (w/in Bootstrap CI)','Individual Results (w/in C.V. error interval)'),
+      nm = c('Averaged Results','Individual CV-Fold Results')))) +
+  # Relabelling the legends
+  scale_shape_manual(values = c(22, 23), labels = c('GBM','GLM')) +
+  guides('shape' = guide_legend(title = 'Model Type',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  scale_color_manual(values = jet.colors(5)[c(2, 4, 3)],
+                     labels = c('None','Age, Sex', 'Age, Sex, ICV')) +
+  guides('color' = guide_legend(title = 'Covariates\nControlled',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  # apply the theme defined in the first code chunk of this .Rmd
+  my_theme +
+  # FINAL LAYER: average for each the bootstraps (is really the averaged result)
+  # and the mean of the individual fold results
+  # Add the point for each mean (since boxplot demarcates median)
+  stat_summary(aes(y = ALL_D_stat), inherit.aes = T, fun = mean, geom = 'point',
+               shape = 21, size = 4, fill = 'white', color = 'black', stroke = 3) +
+  theme(
+    strip.text.x = element_text(size = 24),
+    strip.text.y = element_text(size = 20),
+    axis.text.x = element_text(size = 24),
+    axis.title.x = element_text(size = 28)
+  ) +
+  xlab('Model Type') + ylab('K-S Test Statistic')
+ggsave("../results/KSTestPlotFinal.jpg", device = 'jpg', units = 'in',
+       width = 11*1.7, height = 8*1.7)
+```
+
+
+CVPVI processing and Plotting
+```{r}
+# Old version
+ALL_CVPVI = rbind(
+  imap(res_list,  ~map(.x, function(x, y) x$Observed$CVPVI) %>% 
+         reduce(rbind) %>% 
+         mutate_at('Importance', ~((. - 1)*100)) %>%
+         group_by(Variable) %>%
+         summarize_at('Importance', list(CVPVI = mean, 
+                                         lwrSE = ~(mean(.) - (1.96*(sd(.)/(sqrt(length(.)))))),
+                                         uprSE = ~(mean(.) + (1.96*(sd(.)/(sqrt(length(.)))))),
+                                         lwrSD = ~(mean(.) - (2*sd(.))),
+                                         uprSD = ~(mean(.) + (2*sd(.))),
+                                         lwr = ~quantile(., probs = .025),
+                                         upr = ~quantile(., probs = .975),
+                                         lowThird = ~quantile(., probs = .3333),
+                                         highThird = ~quantile(., probs = .6667))) %>%
+         ungroup %>%
+         arrange(desc(CVPVI)) %>% mutate(pipeline = .y)) %>%
+    reduce(rbind),
+  imap(L.res_list,  ~map(.x, function(x, y) x$Observed$CVPVI) %>% 
+         reduce(rbind) %>%
+         mutate_at('Importance', ~((. - 1)*100)) %>%
+         group_by(Variable) %>%
+         summarize_at('Importance', list(CVPVI = mean, 
+                                         lwrSE = ~(mean(.) - (1.96*(sd(.)/(sqrt(length(.)))))),
+                                         uprSE = ~(mean(.) + (1.96*(sd(.)/(sqrt(length(.)))))),
+                                         lwrSD = ~(mean(.) - (2*sd(.))),
+                                         uprSD = ~(mean(.) + (2*sd(.))),
+                                         lwr = ~quantile(., probs = .025),
+                                         upr = ~quantile(., probs = .975),
+                                         lowThird = ~quantile(., probs = .3333),
+                                         highThird = ~quantile(., probs = .6667))) %>%
+         ungroup %>%
+         arrange(desc(CVPVI)) %>% mutate(pipeline = .y)) %>%
+    reduce(rbind)
+)
+# Without collapsing over 100 rounds
+ALL_INDIVIDUAL_CVPVI = rbind(
+  imap(res_list,  ~map(.x, function(x, y) x$Observed$CVPVI) %>% 
+         reduce(rbind) %>% 
+         mutate(Importance = (Importance - 1)*100, pipeline = .y) %>%
+         group_by(Variable) %>%
+         mutate(iteration = row_number()) %>% ungroup()) %>%
+    reduce(rbind),
+  imap(L.res_list,  ~map(.x, function(x, y) x$Observed$CVPVI) %>% 
+         reduce(rbind) %>% 
+         mutate(Importance = (Importance - 1)*100, pipeline = .y) %>%
+         group_by(Variable) %>%
+         mutate(iteration = row_number()) %>% ungroup()) %>%
+    reduce(rbind)
+)
+#view(ALL_CVPVI)
+ALL_CVPVI %>%
+  mutate(model = sub('_.+$','',pipeline),
+         preproc = sub('G.M_', '', pipeline)) %>%
+  arrange(desc(CVPVI)) %>%
+  mutate_at('Variable', ~factor(., levels = rev(unique(.)))) %>% 
+  ggplot() +
+  geom_segment(aes(x = lwr, y = Variable, yend = Variable, xend = upr, color = Variable), 
+               size = 1.5, show.legend = F) +
+  # geom_segment(aes(x = lowThird, y = Variable, yend = Variable, xend = highThird, color = Variable), 
+  #              show.legend = F, size = 2) +
+  geom_segment(aes(x = lwrSE, y = Variable, yend = Variable, xend = uprSE, color = Variable), 
+               show.legend = F, size = 3) +
+  geom_point(aes(x = CVPVI, y = Variable), color = 'black', show.legend = F, size = 5) +
+  geom_point(aes(x = CVPVI, y = Variable), color = 'white', show.legend = F, size = 4) +
+  geom_point(aes(x = CVPVI, y = Variable), color = 'black', show.legend = F, size = 2.5) +
+  facet_grid(rows = vars(model), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = sort(unique(performance.pltDat$preproc))))) +
+  scale_color_manual(values = jet.colors(n_distinct(ALL_CVPVI$Variable))) +
+  my_theme +
+  theme(text = element_text(size = 30),
+        strip.text =element_text(face = 'bold')) +
+  xlab('Cross-Validated Permutation Variable Impotance (% contributed to model ROCAUC)')
+ggsave("../results/CVPVI-Plot.jpg", device = 'jpg', units = 'in', 
+       width = 22, height = 14)
+```
+
+All the individual CVPVI each resample
+```{r}
+ALL_INDIVIDUAL_CVPVI %>%
+  mutate(model = sub('_.+$','',pipeline),
+         preproc = sub('G.M_', '', pipeline)) %>%
+  group_by(Variable, model, preproc) %>%
+  mutate(med = median(Importance)) %>%
+  arrange(desc(med)) %>%
+  ungroup() %>%
+  mutate_at('Variable', ~factor(., levels = rev(unique(.)))) %>%
+  ggplot() + 
+  geom_density_ridges_gradient(aes(x = Importance, y = Variable, fill = stat(x)),
+                               quantile_lines = T, quantiles = c(.025, .975)) +
+  scale_fill_gradientn(colors = jet.colors(7)) +
+  facet_grid(rows = vars(model), cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = sort(unique(performance.pltDat$preproc)))),
+    scales = 'fixed') +
+  stat_summary(aes(x = Importance, y = Variable), 
+               fun=mean, geom='point', color = 'black', show.legend = F, size = 4.3, alpha = .5) +
+  stat_summary(aes(x = Importance, y = Variable), 
+               fun=mean, geom='point', color = 'white', show.legend = F, size = 3) +
+  stat_summary(aes(x = Importance, y = Variable), 
+               fun=mean, geom='point', color = 'black', show.legend = F, size = 1) +
+  my_theme +
+  theme(text = element_text(size = 30),
+        strip.text =element_text(face = 'bold')) +
+  xlab('Cross-Validated Permutation Variable Importance (% contributed to model ROCAUC)')
+ggsave("../results/all_raw_CVPVI-Plot.jpg", device = 'jpg', units = 'in',
+       width = 20, height = 10)
+```
+
+
+<!-- # ATTEMPTED FOR T-STAT and FAILED -->
+<!-- Within fold t-stat -->
+<!-- DEFINE THE GROUPS SO THAT LEVEL 1 ARE THE PI, AND THE NULL HYPOTHESIS IS THAT -->
+<!-- THEIR PREDICTED PROBABILITIES ARE NOT GREATER -->
+<!-- ```{r} -->
+<!-- t_stat = function(X) { -->
+<!--   dat <- X$Observed$Model$Predictions -->
+<!--   dat$GROUP <- factor(dat$GROUP, levels = c(1, 0)) -->
+<!--   t_test <- t.test(pred_prob ~ GROUP, data = dat, alternative = 'greater') -->
+<!--   t_test$stat -->
+<!-- } -->
+<!-- within_fold_t_stat <- map_dfr(keys, .f = ~{ -->
+<!--   gbm <- sapply(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample -->
+<!--                 function(x) t_stat(x)) -->
+<!--   glm <- sapply(pluck(L.res_list, paste0('GLM_', .x)), -->
+<!--                 function(x) t_stat(x)) -->
+<!--   rbind(data.frame(model = 'GBM', preproc = .x, t_stat = gbm, stringsAsFactors = F), -->
+<!--         data.frame(model = 'GLM', preproc = .x, t_stat = glm, stringsAsFactors = F)) %>% -->
+<!--     remove_rownames() -->
+<!-- }) %>% -->
+<!--   # Calculate CV uncertainty -->
+<!--   group_by(model, preproc) %>% -->
+<!--   mutate(fold_sd_long = sd(t_stat)) -->
+<!-- # Plot these -->
+<!-- ggplot(within_fold_t_stat %>% mutate(grp = paste0(model, "_", preproc)), -->
+<!--        aes(x = 0, color = grp)) +  -->
+<!--   geom_boxplot(aes(y = t_stat), show.legend = F) + -->
+<!--   stat_summary(fun = mean, aes(y = t_stat), geom = 'point',color = 'black') + -->
+<!--   facet_grid(rows = vars(model), cols = vars(preproc)) + -->
+<!--   coord_flip() -->
+
+<!-- within_fold_t_stat %>%  -->
+<!--   mutate(x_axis = paste(preproc, model, sep = '_')) %>% -->
+<!--   ungroup() %>%  -->
+<!--   ggplot(., aes(x = x_axis, y = t_stat)) +  -->
+<!--   geom_boxplot(aes(color = preproc)) +  -->
+<!--   geom_jitter(aes(color = preproc, shape = model), width = .2) + -->
+<!--   scale_shape_manual(values = c(1, 3)) -->
+<!-- ``` -->
+# Check for redundent resamples
+```{r}
+SB.id <- readRDS("../../GBM_classification/data/SB.rds")$IDENT_SUBID # full data IDs
+SB.wave <- ifelse(duplicated(SB.id), 2, 1)
+SB.uniq.id = paste(SB.id, SB.wave, sep = '_')
+resample_combos_df = as.data.frame(combn(100, 2) %>% t) %>%
+  setNames(c('Var1', 'Var2')) %>%
+  rowwise() %>%
+  mutate(equalities = sum(
+    SB.uniq.id[res_list$GBM_AdjustNone[[Var1]]$data$train.indices] %in%
+      SB.uniq.id[res_list$GBM_AdjustNone[[Var2]]$data$train.indices]
+    ),
+    differences = sum(!res_list$GBM_AdjustNone[[Var1]]$data$train.indices %in% 
+                        res_list$GBM_AdjustNone[[Var2]]$data$train.indices)
+  ) %>%
+  mutate(across(starts_with('Var'), .fns = ~paste0('Resample_', .)))
+resample2 = list()
+equality = list()
+counter = 0
+for (i in 1:100) {
+  for (j in 1:100) {
+    counter = counter + 1
+    resample
+    if (i != j) {
+      id_i <- sort(SB.uniq.id[res_list$GBM_AdjustNone[[i]]$data$train.indices])
+      id_j <- sort(SB.uniq.id[res_list$GBM_AdjustNone[[j]]$data$train.indices])
+      
+    }
+    
+  }
+}
+```
+
+# Make directories to store results for each
+Within it, further create a subdirectory with today's date
+```{r}
+iwalk(res_list, ~{
+  system(paste0('mkdir ../Results/', .y))
+  system(paste0('mkdir ../Results/', .y, '/', Sys.Date()))
+})
+```
+
+
+# Process and save all of the results in their respective folders
+Simultaneously, we will return the processed results to use for plotting later
+```{r}
+processed = imap(res_list, ~{
+  results_dir = paste0('../Results/', .y, '/', Sys.Date())
+  # Predictions:
+  avgPreds = map_dfr(.x, function(X) {X$Observed$Model$Predictions}) %>% 
+    group_by(IDENT_SUBID, GROUP) %>% 
+    summarize_at('pred_prob', mean)
+  saveRDS(avgPreds, paste0(results_dir, '/avgPreds.rds'))
+  # train-PVI:
+  avgPVI = map_dfr(.x, function(X) {X$Observed$train_PVI %>% mutate(Rank = rank(-1*Importance))}) %>%
+    group_by(Variable) %>%
+    summarize_all(mean)
+  # CVPVI:
+  avgCVPVI = map_dfr(.x, function(X) {X$Observed$CVPVI %>% mutate(Rank = rank(-1*Importance))}) %>%
+    group_by(Variable) %>% 
+    summarize_all(mean) # don't save yet
+  # Null train PVI:
+  nullPVI = map_dfr(.x, function(X) {reduce(X$Null$tPVI, rbind)}) # note it is in 'tPVI'
+  saveRDS(nullPVI, paste0(results_dir, "/nullPVI.rds"))
+  # Null CVPVI:
+  nullCVPVI = map_dfr(.x, function(X) {reduce(X$Null$CVPVI, rbind)})
+  saveRDS(nullCVPVI, paste0(results_dir, "/nullCVPVI.rds"))
+  # Null predictions: (this one take a minute)
+  nullPreds = map_dfr(1:length(.x), function(n) {map_dfr(1:100, function(N){
+    pluck(.x[[n]]$Null$Model, N)$Predictions[c("IDENT_SUBID", "pred_prob")] %>%
+      mutate(null = paste0('null_', n, "_", N))
+    })}) %>%
+    pivot_wider(id_cols = IDENT_SUBID, names_from = null, values_from = pred_prob)
+  saveRDS(nullPreds, paste0(results_dir, "/nullPreds.rds"))
+  # Null ROCAUC:
+  nullROCAUC = sapply(nullPreds[-1], function(n) {
+    MLmetrics::AUC(y_true = avgPreds$GROUP, 
+                   y_pred = n[match(avgPreds$IDENT_SUBID, nullPreds$IDENT_SUBID)])
+  })
+  saveRDS(nullROCAUC, paste0(results_dir, "/nullROCAUC.rds"))
+  # Now add the permutation pvalues for the CVPVI & PVI
+  # CVPVI:
+  avgCVPVI = avgCVPVI %>% 
+    rowwise() %>%
+    mutate(pvalue = (sum(nullCVPVI$Importance[nullCVPVI$Variable == Variable]>Importance) + 1) /
+             (sum(nullCVPVI$Variable == Variable) + 1))
+  saveRDS(avgCVPVI, paste0(results_dir, "/avgCVPVI.rds"))
+  # PVI:
+  avgPVI = avgPVI %>% 
+    rowwise() %>% 
+    mutate(pvalue = (sum(nullPVI$Importance[nullPVI$Variable == Variable]>Importance) + 1) /
+             (sum(nullPVI$Variable == Variable) + 1))
+  saveRDS(avgPVI, paste0(results_dir, "/avgPVI.rds"))
+  # Variable Importance table combining the cvpvi and pvi
+  VI_table = left_join(avgCVPVI %>% rename_at(vars(-Variable), ~paste0('cvpvi_', .)),
+                       avgPVI %>% rename_at(vars(-Variable), ~paste0('pvi_', .)),
+                       by = 'Variable') %>%
+    arrange(desc(cvpvi_Importance)) %>%
+    mutate_at('Variable', ~factor(., levels = rev(.)))
+  saveRDS(VI_table, paste0(results_dir, "/VI_table.rds"))
+  # Collect the ROCAUC and final predictions in a convenient data frame
+  finalFrame = left_join(avgPreds,
+                         # Take the test data labels from any iteration b/c are all same
+                         .x$Resample_1$Observed$Model$Predictions%>%select(-starts_with('pred')),
+                         by = c("IDENT_SUBID", "GROUP")) %>%
+    mutate_at(c('brain_age_yrs', 'ICV'), ~as.numeric(as.character(.))) 
+  rocauc <- MLmetrics::AUC(y_pred = avgPreds$pred_prob, y_true = avgPreds$GROUP)
+  finalFrame$ROCAUC <- rocauc
+  finalFrame$ROCAUC.pvalue <- (sum(nullROCAUC > rocauc) + 1) / (length(nullROCAUC) + 1)
+  saveRDS(finalFrame, paste0(results_dir, '/finalResults.rds'))
+  write.csv(finalFrame, paste0(results_dir, '/finalResults.rds'), row.names = F)
+  # Return the results in a list for later plotting
+  return(list(
+    'Model.Results' = list('table' = finalFrame,
+                           'null' = nullROCAUC),
+    'VI' = list('VI_tbl'=VI_table, 
+                'CVPVI' = list('obs'=avgCVPVI,'null'=nullCVPVI),
+                'PVI'=list('obs' = avgPVI, 'null' =nullPVI))
+  ))
+})
+iwalk(processed, ~{view(.x$Model.Results$table)})
+```
+
+
+# Model performance plots and cross validation error bars
+```{r}
+ELFK <- readRDS("../../GBM_classification/data/ELFK.rds")
+preds_list = list(
+  'GBM' = list(
+    'Unadjusted' = list('CV.perf' = readRDS("../Output/SB-GBM_final_ADJUSTNOTHING_noIFC_2020-11-21.rds") %>%
+                          imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>% 
+                          group_by(iteration) %>%
+                          summarize(AUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                    Accuracy = MLmetrics::Accuracy(pred_group, GROUP)) %>%
+                          summarize_at(c('AUC', 'Accuracy'), list('mean' = mean, 'sd' = sd)),
+                        'true' = readRDS('../Results/GBM_AdjustNone/2020-11-21/avgPreds.rds'), 
+                        'null' = readRDS('../Results/GBM_AdjustNone/2020-11-21/nullPreds.rds') %>%
+                          left_join(., ELFK[c('IDENT_SUBID', 'GROUP')]) %>%
+                          summarise(across(starts_with('null'), ~MLmetrics::AUC(., GROUP)))),
+    'AgeSexCtrl' = list('CV.perf' =
+                          readRDS("../Output/SB-GBM-final_NoICV-Residualization_noIFC-Subjets_2020-11-21.rds") %>%
+                          imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>% 
+                          group_by(iteration) %>%
+                          summarize(AUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                    Accuracy = MLmetrics::Accuracy(pred_group, GROUP)) %>%
+                          summarize_at(c('AUC', 'Accuracy'), list('mean' = mean, 'sd' = sd)),
+                        'true' = readRDS('../Results/GBM_noICV.Residualize/2020-11-21/avgPreds.rds'),
+                        'null' = readRDS('../Results/GBM_noICV.Residualize/2020-11-21/nullPreds.rds') %>%
+                          left_join(., ELFK[c('IDENT_SUBID', 'GROUP')]) %>%
+                          summarise(across(starts_with('null'), ~MLmetrics::AUC(., GROUP))))),
+  'GLM' = list(
+    'Unadjusted' = list('CV.perf' = readRDS("../Output/SB-LogReg+NullModels_noAdjustment+noIFC2020-11-19.rds") %>%
+                          imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>% 
+                          group_by(iteration) %>%
+                          summarize(AUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                    Accuracy = MLmetrics::Accuracy(pred_group, GROUP)) %>%
+                          summarize_at(c('AUC', 'Accuracy'), list('mean' = mean, 'sd' = sd)),
+                        'true' = readRDS('../Results/GLM_AdjustNone/2020-11-22/avgPreds.rds'),
+                        'null' = readRDS('../Results/GLM_AdjustNone/2020-11-22/nullPreds.rds') %>%
+                          left_join(., ELFK[c('IDENT_SUBID', 'GROUP')]) %>%
+                          summarise(across(starts_with('null'), ~MLmetrics::AUC(., GROUP)))),
+    'AgeSexCtrl' = list('CV.perf' = readRDS("../Output/SB-LogReg+NullModels_noICVResidualize+noIFC2020-11-19.rds") %>%
+                          imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>% 
+                          group_by(iteration) %>%
+                          summarize(AUC = MLmetrics::AUC(pred_prob, GROUP), 
+                                    Accuracy = MLmetrics::Accuracy(pred_group, GROUP)) %>%
+                          summarize_at(c('AUC', 'Accuracy'), list('mean' = mean, 'sd' = sd)),
+                        'true' = readRDS('../Results/GLM_noICV.Residualize/2020-11-22/avgPreds.rds'),
+                        'null' = readRDS('../Results/GLM_noICV.Residualize/2020-11-22/nullPreds.rds') %>%
+                          left_join(., ELFK[c('IDENT_SUBID', 'GROUP')]) %>%
+                          summarise(across(starts_with('null'), ~MLmetrics::AUC(., GROUP)))))
+)
+
+# Collect/summarize data for plotting
+perf_plot_dat = imap_dfr(preds_list, function(x, y) {
+  imap_dfr(x, function(xx, yy) {
+    data.frame(
+      ModelType = y, 
+      Dataset = yy,
+      auc = MLmetrics::AUC(xx$true$pred_prob, y_true = xx$true$GROUP),
+      nulls = xx$null[1, ] %>% unclass %>% unlist %>% as.vector('double')
+    )
+  })
+})
+
+# Additionally, collect the raw predictions, per subject, without summarizing
+# This is for plotting too, to bootstrap the mean pred_prob per subj, for a 95%-CI
+# Define a function to get the bca of 1000 bootstraps
+bca_CI_hack = function(x, B = 1000) {
+  boots <- sapply(1:B, function(b) {mean(sample(x, replace = T))})
+  paste(bca(boots), collapse = '_SPLIT_')
+}
+raw_preds_list = list(
+  'GBM' = list(
+    'Unadjusted' = readRDS("../Output/SB-GBM_final_ADJUSTNOTHING_noIFC_2020-11-21.rds") %>%
+      imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>%
+      group_by(IDENT_SUBID, GROUP) %>%
+      summarise(avg_prob = mean(pred_prob),
+                bootCI.tmp = bca_CI_hack(pred_prob)) %>%
+      dplyr::select(pred_prob = avg_prob, everything()) %>%
+      mutate(boot_lwr = as.numeric(sub('_SPLIT_.+$','',bootCI.tmp)),
+              boot_upr = as.numeric(sub('^.+_SPLIT_','',bootCI.tmp))),
+    'AgeSexCtrl' = readRDS("../Output/SB-GBM-final_NoICV-Residualization_noIFC-Subjets_2020-11-21.rds") %>%
+      imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>%
+      group_by(IDENT_SUBID, GROUP) %>%
+      summarise(avg_prob = mean(pred_prob),
+                bootCI.tmp = bca_CI_hack(pred_prob)) %>%
+      dplyr::select(pred_prob = avg_prob, everything()) %>%
+      mutate(boot_lwr = as.numeric(sub('_SPLIT_.+$','',bootCI.tmp)),
+              boot_upr = as.numeric(sub('^.+_SPLIT_','',bootCI.tmp)))
+    ),
+  'GLM' = list(
+    'Unadjusted' = readRDS("../Output/SB-LogReg+NullModels_noAdjustment+noIFC2020-11-19.rds") %>%
+      imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>%
+      group_by(IDENT_SUBID, GROUP) %>%
+      summarise(avg_prob = mean(pred_prob),
+                bootCI.tmp = bca_CI_hack(pred_prob)) %>%
+      dplyr::select(pred_prob = avg_prob, everything()) %>%
+      mutate(boot_lwr = as.numeric(sub('_SPLIT_.+$','',bootCI.tmp)),
+              boot_upr = as.numeric(sub('^.+_SPLIT_','',bootCI.tmp))),
+    'AgeSexCtrl' = readRDS("../Output/SB-LogReg+NullModels_noICVResidualize+noIFC2020-11-19.rds") %>%
+      imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}) %>%
+      group_by(IDENT_SUBID, GROUP) %>%
+      summarise(avg_prob = mean(pred_prob),
+                bootCI.tmp = bca_CI_hack(pred_prob)) %>%
+      dplyr::select(pred_prob = avg_prob, everything()) %>%
+      mutate(boot_lwr = as.numeric(sub('_SPLIT_.+$','',bootCI.tmp)),
+              boot_upr = as.numeric(sub('^.+_SPLIT_','',bootCI.tmp)))
+  )
+)
+    
+# Save these data summaries
+dir.create("../Results/Final")
+saveRDS(preds_list, "../Results/Final/predictedValuesListAll.rds")
+saveRDS(raw_preds_list, "../Results/Final/predictedProbBootCI-ListAll.rds")
+saveRDS(perf_plot_dat, "../Results/Final/performancePlotsPlottingData.rds")
+```
+```{r}
+# Plot
+perf_plot_dat %>%
+  # Small amount of data reshaping
+  mutate(Dataset = ifelse(Dataset == 'AgeSexCtrl', 
+                          'Age and Sex Adjusted Predictors', 
+                          'Unadjusted Predictors')) %>%
+  mutate(Dataset = factor(Dataset, levels = c('Unadjusted Predictors', 
+                                              'Age and Sex Adjusted Predictors'))) %>%
+  # Plotting
+  ggplot(aes(x = nulls)) +
+  geom_histogram(fill = 'red', bins = 50, color = 'black', size = 1.5, alpha = .58) + 
+  geom_histogram(fill = NA, bins = 50, color = 'black', size = 1.5) + 
+  geom_vline(aes(xintercept = auc, color = auc), size = 5, show.legend = T) +
+  facet_wrap(ModelType + Dataset ~ ., scales = 'free') +
+  # Override some of the custom theme settings for this one.
+  theme(axis.text.x = element_text(size = 30), axis.ticks.x = element_line(color = 'black')) +
+  ylab('Frequency') + xlab('ROC-AUC') +
+  theme(strip.text = element_text(size = 32)) +
+  labs(title = 'Null Distributions and True Model ROC-AUC') +
+  theme(plot.title = element_text(size = 40)) +
+  scale_color_continuous(name = "True Model \nROC-AUC") +
+  guides(color = guide_colorbar(barheight = 13, 
+                                title.theme = element_text(size = 32), 
+                                label.theme = element_text(size = 30))) +
+  theme(axis.title.y = element_text(angle = 90))
+  
+ggsave('../Results/permutationTestPlots.jpg',
+       device = 'jpg', units = 'in', height = 14, width = 22)
+```
+
+
+# prediction plots per subject
+```{r}
+# tmp_df <- preds_list$GBM$Unadjusted$true
+# ggplot(data = NULL) +
+#   geom_jitter(data = tmp_df, aes(x = pred_prob, y = GROUP, color = pred_prob), height = .075) +
+#   geom_line(data = NULL, inherit.aes = F, aes(
+#     x = seq(0, 1, .01),
+#     y = predict(glm(GROUP ~ pred_prob, family = 'quasibinomial', data=tmp_df),
+#                 newdata = data.frame(pred_prob=seq(0, 1, .01)), type = 'response')
+#   ))
+# #rm('tmp_df')
+MinMaxScale = function(x, a, b) {
+  n = (x - min(x, na.rm = T))*(b - a)
+  d = max(x, na.rm = T) - min(x, na.rm = T)
+  return(a + (n/d))
+}
+
+tmp_df <- preds_list$GBM$Unadjusted$true %>%
+  group_by(GROUP) %>%
+  mutate(sortedGroup = MinMaxScale(dense_rank(pred_prob), -4, -.5)) %>%
+  ungroup() %>%
+  mutate(GROUP.fct = factor(as.character(GROUP), levels = c("1", "0"), labels = c('PI', 'Comp'))) %>%
+  # merge in the boot CIs
+  left_join(raw_preds_list$GBM$Unadjusted %>% dplyr::select(-bootCI.tmp),
+            by = c('pred_prob', 'IDENT_SUBID', 'GROUP'))
+# Set up jet palette
+jet.colors <- colorRampPalette(rev(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000")))
+```
+```{r}
+ggplot(data = tmp_df) +
+  geom_histogram(aes(x = pred_prob, fill = GROUP), 
+                 size = 2,
+                 breaks = seq(.25, .625, .0375), 
+                 #binwidth = .05,
+                 show.legend = F, alpha = .8, color = 'white') +
+  geom_errorbar(aes(x = pred_prob, y = sortedGroup, color = pred_prob,
+                    xmin = boot_lwr, xmax = boot_upr),
+                size = 3, alpha = .8) +
+  geom_point(aes(x = pred_prob, y = sortedGroup, color = pred_prob), size = 4) +
+  geom_point(aes(x = pred_prob, y = sortedGroup), fill = NA, color = 'black', shape = 1, size = 4, stroke = 2.5) +
+  geom_hline(aes(yintercept = 0), size = 4) +
+  facet_grid(rows = vars(GROUP.fct), scales = "free_y") +
+  scale_fill_gradientn(colors = jet.colors(7)) +
+  scale_color_gradientn(colors = jet.colors(7)) +
+  theme(panel.border = element_rect(color = 'black', fill = NA, size = .9), 
+        panel.background = element_rect(color = 'black', fill = 'white'), 
+        panel.grid = element_line(color = 'lightgrey', size = .2), 
+        plot.background = element_rect(color = 'white', fill = 'white'), 
+        #axis.text.x = element_blank(), 
+        #axis.ticks.x = element_blank(), 
+        plot.title = element_text(hjust = .5, size = 36), 
+        plot.title.position = 'plot',
+        axis.text = element_text(size = 30),
+        axis.title = element_text(size = 33)) +
+  theme(panel.grid.minor.x = element_blank(), panel.grid.major.x = element_line(linetype = 3)) +
+  theme(panel.grid.minor.y = element_blank(), panel.grid.major.y = element_line(linetype = 3)) +
+  #scale_x_continuous(expand = c(0, 0)) +
+  scale_x_continuous(
+                     expand = c(0.005, 0.005), 
+                     breaks = seq(.25, .625, .0375),
+                     labels = replace(round(seq(.25, .625, .0375), 2), values = '', 
+                                      list = c(F, T, F, T, F, T, F, T, F, T, F))
+                     # breaks = seq(.3, .6, .05), 
+                     # labels = seq(.3, .6, .05)
+                     ) +
+  scale_y_continuous(
+    breaks = c(seq(-4, -.5, length.out = 3), 2*(1:20)), 
+    labels = c(seq(0, 1, length.out = 3), 2*(1:20))
+  ) +
+  ylab('Count per Bin') + xlab('Predicted Probability of Belonging to PI Group') +
+  guides("color" = guide_colorbar(title = 'Probability',title.theme = element_text(size = 30),
+                        label.theme = element_text(size = 28), 
+                        barheight = 12, 
+                        barwidth = 3)) +
+  theme(strip.text = element_text(size = 30))
+ggsave('../Results/DensityOfPredictions.jpg',
+       device = 'jpg', units = 'in', height = 16, width = 22)
+```
+
+
+# Use all of the model predictions to compute the ECDF
+```{r}
+# all_raw_preds_list = raw_preds_list = list(
+#   'GBM' = list(
+#     'Unadjusted' = readRDS("../Output/SB-GBM_final_ADJUSTNOTHING_noIFC_2020-11-21.rds") %>%
+#       imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}),
+#     'AgeSexCtrl' = readRDS("../Output/SB-GBM-final_NoICV-Residualization_noIFC-Subjets_2020-11-21.rds") %>%
+#       imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)})),
+#   'GLM' = list(
+#     'Unadjusted' = readRDS("../Output/SB-LogReg+NullModels_noAdjustment+noIFC2020-11-19.rds") %>%
+#       imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}),
+#     'AgeSexCtrl' = readRDS("../Output/SB-LogReg+NullModels_noICVResidualize+noIFC2020-11-19.rds") %>%
+#       imap_dfr(~{.x$Observed$Model$Predictions %>% mutate(iteration = .y)}))
+# )
+# saveRDS(all_raw_preds_list, "../Results/Final/all_raw_predictions.rds")
+all_raw_preds_list <- readRDS("../Results/Final/all_raw_predictions.rds")
+all_raw_gbm_unadjusted <- all_raw_preds_list$GBM$Unadjusted
+ks.test(x = all_raw_gbm_unadjusted$pred_prob[as.logical(all_raw_gbm_unadjusted$GROUP)],
+        y = all_raw_gbm_unadjusted$pred_prob[!as.logical(all_raw_gbm_unadjusted$GROUP)])
+ggplot(all_raw_gbm_unadjusted, aes(pred_prob, group = GROUP, color = factor(GROUP))) + 
+  stat_ecdf(geom = "point", alpha = .03, size = 4)
+```
+# Another way to visuzlize it
+```{r}
+ggplot(data = NULL) +
+  stat_ecdf(data = all_raw_gbm_unadjusted,
+            aes(pred_prob, color = iteration, linetype = factor(GROUP)),
+            geom = "line", alpha = .5, show.legend = F) +
+  stat_ecdf(data = all_raw_gbm_unadjusted %>%
+              filter(iteration == "Resample_25" | iteration == "Resample_50" | iteration == "Resample_1"),
+            aes(pred_prob, color = iteration, linetype = factor(GROUP)),
+            geom = "line", alpha = 1, show.legend = F, size = 1.7)
+```
+
+
+```{r}
+iris2 <- iris %>% filter(Species != "versicolor")
+ggplot(iris2, aes(Petal.Length, group = Species, color = Species)) + stat_ecdf()
+ks.test(x = iris2$Sepal.Length[1:50], y = iris2$Sepal.Length[51:100])
+```
+
+# Simple model performance plots with bootstrap CI
+The model performance is calculated by averaging the predictions of 100 models.
+To generate a bootstrap CI for these averages we will bootstrap resample the test
+set once, and then recalculate the average predictions for the bootstrap sample
+for all 100 models. When test set subjects are resampled more than once into the 
+bootstrap sample, they will be treated as distinct samples for the purposes of
+model averaging (though their predicted values will all be identical).
+```{r}
+set.seed(1)
+bootstraps = purrr::map(res_list, function(res) {
+  boot_rocauc = mclapply(1:1000, mc.cores = 3, function(i) {
+    b = sample(nrow(res$Resample_1$Observed$Model$Predictions), replace = T)
+    b_id = paste(b, 1:length(b), sep = '_')
+    boot100 = map_dfr(res, ~{
+      .x$Observed$Model$Predictions[b, ] %>%
+        mutate(b_id = paste(IDENT_SUBID, 1:nrow(.), sep = '_'))
+    }) %>%
+      group_by(b_id, IDENT_SUBID, GROUP) %>%
+      summarize_at('pred_prob', mean)
+    MLmetrics::AUC(y_pred=boot100$pred_prob, y_true = boot100$GROUP)
+  }) %>% unlist
+  boot_rocauc
+})
+```
+
+
+# Plot the performance of each model in the bootstrap CI
+```{r}
+imap_dfr(processed, ~{
+  .x$Model.Results$table %>% ungroup %>%  slice(1) %>% select(ROCAUC) %>%
+    mutate(boot_sd = sd(bootstraps[[.y]]),
+           rocauc_lwr = ROCAUC - 2*boot_sd,
+           rocauc_upr = ROCAUC + 2*boot_sd,
+           pipeline = .y) 
+}) %>%
+  # merge this in with the null results
+  mutate(null = FALSE) %>%
+  rbind(.,
+        imap_dfr(
+          processed, 
+          ~{data.frame(
+            ROCAUC = .x$Model.Results$null,
+            pipeline = .y, null = TRUE,
+            boot_sd = NA, rocauc_lwr = NA, rocauc_upr = NA)})) %>%
+  ggplot(aes(x = pipeline, y = ROCAUC,color = pipeline)) + 
+  geom_point(data = . %>% filter(!null)) + 
+  geom_errorbar(data = .%>% filter(!null),
+                aes(ymin = rocauc_lwr, ymax = rocauc_upr), width = .1) +
+  geom_jitter(data = . %>% filter(null), alpha = .01, width = .1) + 
+  stat_summary(geom = 'point', fun = mean, aes(y = ROCAUC), color = 'black') + 
+  theme(axis.text.x = element_blank()) + 
+  coord_cartesian(ylim = c(0, 1))
+```
+
+
+# Plot all of the variable importances, including CVPVI and PVI
+```{r}
+imap_dfr(processed, ~{
+  .x$VI$VI_tbl %>% select(contains(match = c('Variable', 'Importance', 'pvalue'))) %>%
+    mutate(Pipeline = .y)
+}) %>%
+  pivot_longer(contains('Importance'), names_to='data', values_to='Importance') %>%
+  mutate(pvalue = ifelse(grepl('^cvpvi', data), cvpvi_pvalue, pvi_pvalue)) %>%
+  mutate_at('data', ~ifelse(grepl('^cvpvi', .), 'Test', 'Train')) %>%
+  select(Pipeline, data, Variable, Importance,  pvalue) %>%
+  arrange(desc(Importance)) %>%
+  mutate_at('Variable', ~factor(., levels = unique(.))) %>%
+  mutate(Fill = paste(Pipeline, data, sep = "_"),
+         Significance = ifelse(pvalue < .05, "p < .05", "n.s.")) %>%
+  mutate_at('Importance', ~(. - 1)) %>%
+  ggplot(aes(y = Importance, x = Variable)) +
+  geom_col(aes(fill = Fill, color = Significance), position = 'dodge', width = 1) +
+  scale_fill_discrete(name = c('Fill'='Model Specifics'), labels = c('Test_Unadjusted',
+                                                'Train_Unadjusted',
+                                                'Test_AgeSexAdjusted',
+                                                'Train_AgeSexAdjusted',
+                                                'Test_AgeSexICVAdjusted',
+                                                'Train_AgeSexICVAdjusted')) +
+  scale_color_manual(values = c('p < .05' = 'blue', 'n.s.' = 'white')) + 
+  #ylab('Percent Contribution to ROC-AUC') + xlab('') + 
+  ylab('') + xlab('') + 
+  labs(title = 'Variable Importance in GBM Models') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank()) 
+```
+
+
+# Plot CVPVI and PVI only for the models with unadjusted features (best model)
+```{r}
+# Read in just the VI_tbl objects into a feux 'processed' object
+processed <- imap(res_list, ~{
+  dir = paste0('../Results/', .y, '/2020-11-21/VI_table.rds')
+  list('VI' = list('VI_tbl' = readRDS(dir)))
+})
+```
+```{r}
+imap_dfr(processed, ~{
+  .x$VI$VI_tbl %>% select(contains(match = c('Variable', 'Importance', 'pvalue'))) %>%
+    mutate(Pipeline = .y)
+}) %>%
+  filter(grepl('AdjustNone', x = Pipeline)) %>%
+  pivot_longer(contains('Importance'), names_to='data', values_to='Importance') %>%
+  mutate(pvalue = ifelse(grepl('^cvpvi', data), cvpvi_pvalue, pvi_pvalue)) %>%
+  mutate_at('data', ~ifelse(grepl('^cvpvi', .), 'Test', 'Train')) %>%
+  select(Pipeline, data, Variable, Importance,  pvalue) %>%
+  arrange(Importance) %>%
+  mutate_at('Variable', ~factor(., levels = unique(.))) %>%
+  mutate(Fill = paste(Pipeline, data, sep = "_"),
+         `Permutation p-value` = ifelse(pvalue < .05, "p < .05", "n.s.")) %>%
+  mutate_at('Importance', ~(. - 1)*100) -> plt_data
+```
+```{r}
+ggplot(plt_data, aes(y = Importance, x = Variable)) +
+  geom_col(aes(fill = Fill, color = `Permutation p-value`), 
+           position = 'dodge', width = 1, size = 3) +
+  scale_fill_discrete(name = c('Fill'='Dataset'), 
+ # Since they are both on unadjusted data, just specify which is train and test
+                      labels = c('Test', 'Train')) +
+  scale_color_manual(values = c('p < .05' = 'blue', 'n.s.' = 'white')) + 
+  ylab('Percent Contribution to ROC-AUC') + xlab('') + 
+  #ylab('') + xlab('') + 
+  labs(title = 'Variable Importance in GBM Models') +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1), 
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.y = element_blank()) +
+  scale_x_discrete(limits = plt_data$Variable %>% levels) +
+  coord_flip() +
+  theme(text = element_text( size = 36))
+ggsave('../Results/unadjustedVariableImportancePlot.jpg', 
+       width = 21, height = 16, device = 'jpg', units = 'in')
+```
+
+# Process the logistic regression results as well
+```{r}
+L.res_list = list(
+  "GLM_noICV.Residualize"=readRDS('../Output/SB-LogReg+NullModels_noICVResidualize+noIFC2020-11-19.rds'), 
+  "GLM_ResidualizeAll"=readRDS('../Output/SB-LogReg+NullModels_ResidualizedAll+noIFC2020-11-19.rds'), 
+  "GLM_AdjustNone"= readRDS('../Output/SB-LogReg+NullModels_noAdjustment+noIFC2020-11-19.rds')  
+)
+# Make Results directories
+iwalk(L.res_list, ~{
+  system(paste0('mkdir ../Results/', .y))
+  system(paste0('mkdir ../Results/', .y, '/', Sys.Date()))
+})
+```
+
+Generate the results from each pipeline
+```{r}
+L.processed = imap(L.res_list, ~{
+  results_dir = paste0('../Results/', .y, '/', Sys.Date())
+  # Predictions:
+  avgPreds = map_dfr(.x, function(X) {X$Observed$Model$Predictions}) %>% 
+    group_by(IDENT_SUBID, GROUP) %>% 
+    summarize_at('pred_prob', mean)
+  saveRDS(avgPreds, paste0(results_dir, '/avgPreds.rds'))
+  # train-PVI:
+  avgPVI = map_dfr(.x, function(X) {X$Observed$train_PVI %>% mutate(Rank = rank(-1*Importance))}) %>%
+    group_by(Variable) %>%
+    summarize_all(mean)
+  # CVPVI:
+  avgCVPVI = map_dfr(.x, function(X) {X$Observed$CVPVI %>% mutate(Rank = rank(-1*Importance))}) %>%
+    group_by(Variable) %>% 
+    summarize_all(mean) # don't save yet
+  # Null train PVI:
+  # note it is in 'tPVI', and for logistic regression, already r-binded up.
+  nullPVI = map_dfr(.x, function(X) {X$Null$tPVI}) 
+  saveRDS(nullPVI, paste0(results_dir, "/nullPVI.rds"))
+  # Null CVPVI:
+  # note for logistic regression, already r-binded up.
+  nullCVPVI = map_dfr(.x, function(X) {X$Null$CVPVI})
+  saveRDS(nullCVPVI, paste0(results_dir, "/nullCVPVI.rds"))
+  # Null predictions: (this one take a minute)
+  nullPreds = map_dfr(1:length(.x), function(n) {map_dfr(1:100, function(N){
+    pluck(.x[[n]]$Null$Model, N)$Predictions[c("IDENT_SUBID", "pred_prob")] %>%
+      mutate(null = paste0('null_', n, "_", N))
+    })}) %>%
+    pivot_wider(id_cols = IDENT_SUBID, names_from = null, values_from = pred_prob)
+  saveRDS(nullPreds, paste0(results_dir, "/nullPreds.rds"))
+  # Null ROCAUC:
+  nullROCAUC = sapply(nullPreds[-1], function(n) {
+    MLmetrics::AUC(y_true = avgPreds$GROUP, 
+                   y_pred = n[match(avgPreds$IDENT_SUBID, nullPreds$IDENT_SUBID)])
+  })
+  saveRDS(nullROCAUC, paste0(results_dir, "/nullROCAUC.rds"))
+  # Now add the permutation pvalues for the CVPVI & PVI
+  # CVPVI:
+  avgCVPVI = avgCVPVI %>% 
+    rowwise() %>%
+    mutate(pvalue = (sum(nullCVPVI$Importance[nullCVPVI$Variable == Variable]>Importance) + 1) /
+             (sum(nullCVPVI$Variable == Variable) + 1))
+  saveRDS(avgCVPVI, paste0(results_dir, "/avgCVPVI.rds"))
+  # PVI:
+  avgPVI = avgPVI %>% 
+    rowwise() %>% 
+    mutate(pvalue = (sum(nullPVI$Importance[nullPVI$Variable == Variable]>Importance) + 1) /
+             (sum(nullPVI$Variable == Variable) + 1))
+  saveRDS(avgPVI, paste0(results_dir, "/avgPVI.rds"))
+  # Variable Importance table combining the cvpvi and pvi
+  VI_table = left_join(avgCVPVI %>% rename_at(vars(-Variable), ~paste0('cvpvi_', .)),
+                       avgPVI %>% rename_at(vars(-Variable), ~paste0('pvi_', .)),
+                       by = 'Variable') %>%
+    arrange(desc(cvpvi_Importance)) %>%
+    mutate_at('Variable', ~factor(., levels = rev(.)))
+  saveRDS(VI_table, paste0(results_dir, "/VI_table.rds"))
+  # Collect the ROCAUC and final predictions in a convenient data frame
+  finalFrame = left_join(avgPreds,
+                         # Take the test data labels from any iteration b/c are all same
+                         .x$Resample_1$Observed$Model$Predictions%>%select(-starts_with('pred')),
+                         by = c("IDENT_SUBID", "GROUP")) %>%
+    mutate_at(c('brain_age_yrs', 'ICV'), ~as.numeric(as.character(.))) 
+  rocauc <- MLmetrics::AUC(y_pred = avgPreds$pred_prob, y_true = avgPreds$GROUP)
+  finalFrame$ROCAUC <- rocauc
+  finalFrame$ROCAUC.pvalue <- (sum(nullROCAUC > rocauc) + 1) / (length(nullROCAUC) + 1)
+  saveRDS(finalFrame, paste0(results_dir, '/finalResults.rds'))
+  write.csv(finalFrame, paste0(results_dir, '/finalResults.rds'), row.names = F)
+  # Finally collect the average regression coeficcients
+  avgBeta <- map_dfr(.x, function(X) X$Observed$train_coef[-1]) %>% 
+    pivot_longer(everything(), names_to = 'Variable', values_to = 'Beta') %>%
+    group_by(Variable) %>%
+    summarize_at('Beta', .funs = list(MeanBeta = mean, boosting_SD = sd))
+  # Return the results in a list for later plotting
+  return(list(
+    'Model.Results' = list('table' = finalFrame,
+                           'null' = nullROCAUC),
+    'VI' = list('VI_tbl'=VI_table, 
+                'CVPVI' = list('obs'=avgCVPVI,'null'=nullCVPVI),
+                'PVI'=list('obs' = avgPVI, 'null' =nullPVI),
+                'Betas' = avgBeta)
+  ))
+})
+iwalk(L.processed, ~{view(.x$Model.Results$table)})
+```
+
+
+# Calculate the bootstrap distr of model performance for logistic reg
+```{r}
+set.seed(1)
+L.bootstraps = purrr::map(L.res_list, function(res) {
+  boot_rocauc = mclapply(1:1000, mc.cores = 3, function(i) {
+    b = sample(nrow(res$Resample_1$Observed$Model$Predictions), replace = T)
+    b_id = paste(b, 1:length(b), sep = '_')
+    boot100 = map_dfr(res, ~{
+      .x$Observed$Model$Predictions[b, ] %>%
+        mutate(b_id = paste(IDENT_SUBID, 1:nrow(.), sep = '_'))
+    }) %>%
+      group_by(b_id, IDENT_SUBID, GROUP) %>%
+      summarize_at('pred_prob', mean)
+    MLmetrics::AUC(y_pred=boot100$pred_prob, y_true = boot100$GROUP)
+  }) %>% unlist
+  boot_rocauc
+})
+```
+
+
+# Model performance plots for logistic regression
+```{r}
+imap_dfr(L.processed, ~{
+  .x$Model.Results$table %>% ungroup %>%  slice(1) %>% select(ROCAUC) %>%
+    mutate(boot_sd = sd(L.bootstraps[[.y]]),
+           rocauc_lwr = ROCAUC - 2*boot_sd,
+           rocauc_upr = ROCAUC + 2*boot_sd,
+           pipeline = .y) 
+}) %>%
+  # merge this in with the null results
+  mutate(null = FALSE) %>%
+  rbind(.,
+        imap_dfr(
+          L.processed, 
+          ~{data.frame(
+            ROCAUC = .x$Model.Results$null,
+            pipeline = .y, null = TRUE,
+            boot_sd = NA, rocauc_lwr = NA, rocauc_upr = NA)})) %>%
+  ggplot(aes(x = pipeline, y = ROCAUC,color = pipeline)) + 
+  geom_point(data = . %>% filter(!null)) + 
+  geom_errorbar(data = .%>% filter(!null),
+                aes(ymin = rocauc_lwr, ymax = rocauc_upr), width = .1) +
+  geom_jitter(data = . %>% filter(null), alpha = .01, width = .1) + 
+  stat_summary(geom = 'point', fun = mean, aes(y = ROCAUC), color = 'black') + 
+  theme(axis.text.x = element_blank()) + 
+  coord_cartesian(ylim = c(0, 1))
+```
+
+
+
+# Combine the two model performance plots
+```{r}
+rbind(
+  # For the GBM
+  imap_dfr(processed, ~{
+  .x$Model.Results$table %>% ungroup %>%  slice(1) %>% select(ROCAUC) %>%
+    mutate(boot_sd = sd(bootstraps[[.y]]),
+           rocauc_lwr = ROCAUC - 2*boot_sd,
+           rocauc_upr = ROCAUC + 2*boot_sd,
+           pipeline = .y) 
+  }) %>%
+    # merge this in with the null results
+    mutate(null = FALSE) %>%
+    rbind(.,
+          imap_dfr(
+            processed, 
+            ~{data.frame(
+              ROCAUC = .x$Model.Results$null,
+              pipeline = .y, null = TRUE,
+              boot_sd = NA, rocauc_lwr = NA, rocauc_upr = NA)})) %>%
+    mutate(Method = 'GBM'),
+  # GLM:
+  imap_dfr(L.processed, ~{
+  .x$Model.Results$table %>% ungroup %>%  slice(1) %>% select(ROCAUC) %>%
+    mutate(boot_sd = sd(L.bootstraps[[.y]]),
+           rocauc_lwr = ROCAUC - 2*boot_sd,
+           rocauc_upr = ROCAUC + 2*boot_sd,
+           pipeline = .y) 
+  }) %>%
+    # merge this in with the null results
+    mutate(null = FALSE) %>%
+    rbind(.,
+          imap_dfr(
+            L.processed, 
+            ~{data.frame(
+              ROCAUC = .x$Model.Results$null,
+              pipeline = .y, null = TRUE,
+              boot_sd = NA, rocauc_lwr = NA, rocauc_upr = NA)})) %>%
+    mutate(Method = 'GLM')
+) %>%
+  mutate(pipeline = sub('^G.M_', '', pipeline)) %>%
+  ggplot(aes(x = pipeline, y = ROCAUC,color = pipeline, group = Method, shape = Method)) + 
+  # Plot the nulls:
+  geom_point(data = . %>% filter(null), alpha = .01, position = position_jitterdodge()) +
+  stat_summary(geom = 'point', fun = mean, aes(y = ROCAUC), color = 'black',
+               position = position_dodge(width = .7)) +
+  # Plot the observed, around bootstrap CI:
+  geom_point(data = . %>% filter(!null), position = position_dodge(width = .7)) + 
+  geom_errorbar(data = .%>% filter(!null),
+                color = 'black',
+                aes(ymin = rocauc_lwr, ymax = rocauc_upr), 
+                position = position_dodge(width = .7), width = .1) +
+  
+  theme(axis.text.x = element_blank()) + 
+  coord_cartesian(ylim = c(0, 1))  +
+  scale_color_discrete(name = c('pipeline'='Model Features'), 
+                       labels = c('Unadjusted',
+                                  'AgeSexAdjusted',
+                                  'AgeSexICVAdjusted')) +
+  scale_shape_discrete(name = c('Method'='Model Type'), 
+                       labels = c('Gradient Boosted Trees',
+                                  'Stacked Logistic Regression')) +
+  labs(title = 'ROC-AUC for Classification of Groups') +
+  xlab('') + ylab('') +
+  theme(axis.ticks.x = element_blank())
+```
+
+
+
+# Generate a table for the results
+```{r}
+res_tbl = data.frame(
+  Description = "All brain volumes are residualized first for age and sex.
+  Models are built with SB and validated in ELFK. IFCs are excluded.",
+  ROCAUC = obs.rocauc, ROCAUC_pvalue = ROCAUC.pvalue
+)
+# Print
+table(avgPreds$GROUP, round(avgPreds$pred_prob))
+res_tbl
+```
+
+
+A plot of the results
+CHANGE FILE PATH ACCORDINGLY
+```{r}
+finalFrame <- left_join(avgPreds,
+                        res1$Resample_1$Observed$Model$Predictions%>%select(-starts_with('pred')),
+                        by = c("IDENT_SUBID", "GROUP")) %>%
+  mutate_at(c('brain_age_yrs', 'ICV'), ~as.numeric(as.character(.)))
+jpeg(width = 720, height = 400, filename = "../Results/2020-11-19/LOGREG-Resultsplot.jpeg")
+finalFrame %>% mutate(color_codes = factor(case_when((GROUP==1) & (round(pred_prob)==1) ~ 'TrueP',
+                                              (GROUP==0) & (round(pred_prob)==0) ~ 'TrueN',
+                                              (GROUP==1) & (round(pred_prob)==0) ~ 'FalseN',
+                                              (GROUP==0) & (round(pred_prob)==1) ~ 'FalseP'))) %>%
+  mutate(correct_yn = ifelse(grepl('^True', color_codes), 'Yes', 'No')) %>%
+  ggplot(aes(x = brain_age_yrs, y = ICV)) + 
+  geom_point(aes(color = pred_prob, shape= correct_yn), size = 8, alpha = .95) + 
+  facet_wrap(~GROUP) + 
+  scale_shape_manual(values = c('Yes' = 16, 'No' = 4)) + 
+  scale_size_manual(values = c('Yes' = 3, 'No' = 4)) +
+  scale_color_viridis_c()
+grid.force()
+grid.edit("geom_point.points", grep = TRUE, gp = gpar(lwd = 10), global = T)
+dev.off()
+```
+
+
+# Hyperparameters and model perf
+```{r}
+map_dfr(res1, ~{.x$Observed$Model$Scores}) %>%
+  mutate(num_trees = map_dbl(res1, ~{.x$Observed$num_trees})) %>%
+  ggplot(., aes(x = num_trees, y = test_ROCAUC)) +
+  geom_point() + geom_smooth(method = 'lm', formula = 'y ~ x')
+```
+
+
+# Confound regression
+```{r}
+confound_reg_df = avgPreds %>%
+  left_join(., y = res1$Resample_1$Observed$Model$Predictions %>% select(-pred_prob))
+# Fit model
+full_mod = glm(GROUP ~ as.numeric(as.character(ICV)) + pred_prob, data = confound_reg_df, family = 'binomial')
+summary(full_mod)
+car::Anova(full_mod, type = 3)
+```
+
+
+# Test to see if the predicted values of the model correlate with CBCL within groups
+```{r}
+source("../Scripts/functions.R")
+# 1. Read in the elfk data used for classification.
+ELFK <- readRDS("../../GBM_classification/data/ELFK.rds")
+ifc_list <- read_csv('../data/ifc_list.csv')
+# Filter out the IFC
+ELFK <- ELFK %>% anti_join(ifc_list %>% select(IDENT_SUBID = id), by = 'IDENT_SUBID') 
+# 2. Read in the elfk master data with the cbcl scores, and merge them in
+# Read in the elfk master data frame from which we'll merge in the 3 CBCL scale scores
+elfk.master <- read_csv("../../GBM_regression/data/ELFK_Master_Data.csv") %>%
+  # first off, rename the ADOPT_YN variable to GROUP
+  mutate(GROUP = ADOPT_YN)
+# Read in the average predicted probs from the classification odels
+#avgPreds <- readRDS('../Results/avgPreds.rds')
+# 4. Now loop through the CBCL variables we wish to pull, and extract the data 
+ELFK_cbcl.list <- list()
+cbcl_response = c("CBCL_4_INTERNPROB_T", "CBCL_4_EXTERNPROB_T", "CBCL_4_TOTPROB_T")
+preproc = list(Residualize, Residualize_noICV, function(x, y) y[x])
+model = c("GBM_ResidualizeAll", "GBM_noICV.Residualize", "GBM_AdjustNone")
+pred_probs = lapply(model,function(x) readRDS(paste0("../Results/", x, "/2020-11-21/avgPreds.rds")))
+# NOTE the above three lines are hard coded to be in the same order!!!
+indexer = 0
+nms = c()
+for (nm in cbcl_response) {
+  for (j in 1:length(preproc)) {
+    indexer = indexer + 1
+    nms[[indexer]] = paste0(nm, "_", model[j])
+    # Preprocess the data as in each classification pipeline
+  # Then merge in each of the three cbcl responses
+  df = cbind(
+    ELFK %>% select(-starts_with(match = c("L.", 'R.'))),
+    imap(ELFK %>% select(starts_with(match = c("L.", 'R.'))), ~preproc[[j]](.y, ELFK))
+  ) %>%
+    merge(., dplyr::select(elfk.master, all_of(c('IDENT_SUBID', nm))), by = 'IDENT_SUBID') %>%
+    drop_na() %>% # due to fewer having CBCL, this drops us 52
+    rename_at(vars(starts_with('CBCL')), ~ 'CBCL') %>%
+    # Merge in the correct predicted values:
+    merge(pred_probs[[j]], by = c('IDENT_SUBID', 'GROUP'))
+  ELFK_cbcl.list[[indexer]] = df
+  }
+}
+names(ELFK_cbcl.list) <- nms
+# Fit all the models
+all_mods = lapply(ELFK_cbcl.list, function(df) {
+  lapply(unique(df$GROUP), function(grp) {
+    dat = df[df$GROUP == grp, ]
+    summary(lm(CBCL ~ pred_prob, data = dat))
+  })
+})
+all_mods
+```
+```{r}
+# Sanity check models
+sanity_check_mods = lapply(ELFK_cbcl.list, function(df) {
+  summary(glm(GROUP ~ pred_prob, data = df, family = 'quasibinomial'))
+})
+sanity_check_mods
+```
+```{r}
+# Left hippocampus models
+# Sanity check models
+lhip_mods = lapply(ELFK_cbcl.list, function(df) {
+  summary(lm(CBCL ~ L.Hippocampus, data = df))
+})
+lhip_mods
+```
+Left hippocampus within each group
+```{r}
+lhip2_mods = lapply(ELFK_cbcl.list, function(df) {
+  lapply(unique(df$GROUP), function(grp) {
+    dat = df[df$GROUP == grp, ]
+    summary(lm(CBCL ~ L.Hippocampus, data = dat))
+  })
+})
+lhip2_mods
+```
+
+```{r}
+lapply(ELFK_cbcl.list, function(df) {
+  summary(lm(CBCL ~ brain_age_yrs + GENDER_FEMALE + GROUP + ICV +L.Hippocampus, data = df))
+})
+```
+
+```{r}
+lapply(ELFK_cbcl.list, function(df) {
+  summary(lm(CBCL ~ GROUP, data = df))
+})
+```
+
+```{r}
+z <- lapply(1:3, function(i) ELFK_cbcl.list[[i]])
+names(z) <- names(ELFK_cbcl.list)[1:3]
+fq_nm = names(elfk.master%>%select(starts_with('FQ_'), -contains('DATE')))
+names(fq_nm) <- fq_nm
+if_nm = names(elfk.master%>%select(starts_with('IF_'), -contains('DATE')))
+names(if_nm) <- if_nm
+lapply(if_nm, function(x) {
+  z[[3]] %>% left_join(elfk.master[c('IDENT_SUBID', x)]) %>%
+    dplyr::select(GROUP, brain_age_yrs,GENDER_FEMALE,pred_prob, y = all_of(x), L.Hippocampus) %>%
+    drop_na() -> dat
+    #if (n_distinct(dat$y) > 1) {try(lm(y ~ pred_prob, data = dat[dat$GROUP==1,]) %>% summary)}
+    #if (n_distinct(dat$y) > 1) {try(lm(y ~ pred_prob, data = dat) %>% summary)}
+    if (n_distinct(dat$y) > 1) {try(lm(y ~ GROUP + brain_age_yrs + GENDER_FEMALE + scale(L.Hippocampus), data = dat) %>% summary)}
+})  
+```
+
+
+
