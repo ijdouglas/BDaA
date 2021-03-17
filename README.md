@@ -25,7 +25,7 @@ All scripts source the file `functions.R` (in `scripts/FINAL`)
 
 **Results**
 
-The above pipeline resulted in the following files
+The above pipeline resulted in the following files (contained in `output/FINAL`
 
 - `SB-LogReg-CVPVI_ADJUSTNOTHING_2021-01-12.rds` (created on Jan 12, 2021 at 15:36)
 - `SB-LogReg-CVPVI_AgeSexAdjusted_2021-01-12.rds` (created on Jan 12, 2021 at 15:37)
