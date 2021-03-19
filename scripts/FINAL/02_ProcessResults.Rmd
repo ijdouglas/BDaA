@@ -155,6 +155,10 @@ view(FINAL_RESULTS_TABLE)
 saveRDS(FINAL_RESULTS_TABLE, "../results/final_results_tbl.rds")
 write.csv(FINAL_RESULTS_TABLE, "../results/final_results_tbl.csv", row.names = F)
 ```
+```{r}
+FINAL_RESULTS_TABLE <- readRDS("../results/final_results_tbl.rds")
+```
+
 
 CVPVI
 ```{r}
@@ -185,7 +189,7 @@ L.res_cvpvi <- process_cvpvi(L.res_list) %>% setNames(nm = names(L.res_list))
 
 ALL_CVPVI_tbl <- rbind(imap_dfr(res_cvpvi, ~.x %>% mutate(pipeline = .y)),
                        imap_dfr(L.res_cvpvi, ~.x %>% mutate(pipeline = .y)))
-saveRDS(ALL_CVPVI_tbl, "../results/CVPVI_tbl.rds")
+#saveRDS(ALL_CVPVI_tbl, "../results/CVPVI_tbl.rds")
 view(ALL_CVPVI_tbl)
 ALL_CVPVI_tbl <- readRDS("../results/CVPVI_tbl.rds")
 ```
@@ -223,10 +227,13 @@ cvpvi_permutation_test = function(the_results, perms)
         setNames(nm = names(nullFrame))
     })
 }
-permtest_1000 <- cvpvi_permutation_test(res_list, 1000)
-L.permtest_1000 <- cvpvi_permutation_test(L.res_list, 1000)
+#permtest_1000 <- cvpvi_permutation_test(res_list, 1000)
+#L.permtest_1000 <- cvpvi_permutation_test(L.res_list, 1000)
 saveRDS(list('GBM'=permtest_1000,'GLM'=L.permtest_1000),
         "../output/cvpvi_permutation_tests_BOTH-MODELTYPES.rds")
+permtest.list <- readRDS("../output/cvpvi_permutation_tests_BOTH-MODELTYPES.rds")
+permtest_1000 <- permtest.list$GBM
+L.permtest_1000 <- permtest.list$GLM
 pvals <- imap_dfr(permtest_1000, ~{
   true_cvpvi = ALL_CVPVI_tbl %>%
     filter(pipeline %in% .y)
@@ -385,10 +392,15 @@ ggplot(cvpvi.pltDat, aes(y = Variable)) +
          shape = guide_legend(title.theme = element_blank(),
                               label.theme = element_text(size = 24),
                               override.aes = list(size = 3))) +
-  xlab('%-change in model performance (ROCAUC) associated with adding each variable to model') +
-  ggtitle("Cross-Validated Ensemble Importance for Brain Volume Variable")
+  xlab('% of model accuracy attributable to a given brain region') +
+  ggtitle("Subcortical Brain Regions Significantly Different\nBetween Groups in the Test Data")
 ggsave("../results/CVPVI_ROCAUC_Plot.jpg", device="jpg", units = 'in',
        height = 12, width = 22)
+ggsave("~/DANL/MastersResearch/results/CVPVI_ROCAUC_Plot.jpg", device="jpg", units = 'in',
+       height = 12, width = 22)
+```
+
+```{r}
 # D-stat based
 ggplot(cvpvi.pltDat, aes(y = Variable)) +
   geom_vline(aes(xintercept = 0), linetype = 2, color = '#838383') +
@@ -504,7 +516,7 @@ ecdf.pltDat = map_dfr(keys, .f = ~{
                                    SE = ~sd(., na.rm = T)/sqrt(length(.)))) %>% ungroup %>%
     select(pred_prob = tmp, everything())
   rbind(data.frame(model = 'GBM', preproc = .x, gbm, stringsAsFactors = F),
-        data.frame(model = 'GLM', preproc = .x, glm, stringsAsFactors = F)) %>%
+        data.frame(model = 'Logistic Reg.', preproc = .x, glm, stringsAsFactors = F)) %>%
     remove_rownames()
 }) %>%
   mutate(pipeline = paste(model, preproc, sep = '_')) %>%
@@ -514,14 +526,15 @@ ecdf.pltDat = map_dfr(keys, .f = ~{
 ecdf.pltDat %>%
   arrange(pred_prob) %>%
   #mutate_at('IDENT_SUBID', ~factor(., levels = unique(.))) %>%
-  group_by(GROUP, pipeline) %>%
-  mutate(rank_id = dense_rank(pred_prob) / n()) %>% ungroup %>%
+  group_by(GROUP, pipeline, preproc) %>%
+  mutate(rank_id = 100*(dense_rank(pred_prob) / n())) %>% ungroup %>%
   mutate_at(vars(GROUP), ~factor(c("Comp", "PI")[. + 1], levels = c("PI", "Comp"))) %>%
   mutate_at(vars(pipeline, preproc), ~case_when(
     grepl("Unadjusted$", .) ~ sub("[[:punct:]]", "", sub("Unadjusted", ": No Covariates", .)),
     grepl("AllAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AllAdjusted", ": All Covariates", .)),
-    grepl("AgeSexAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AgeSexAdjusted", ": Age, Sex Controlled", .))
+    grepl("AgeSexAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AgeSexAdjusted", ": Age, Sex Controlled for", .))
   )) %>%
+  mutate_at('preproc', ~factor(., levels = c(unique(.)[2], unique(.)[1], unique(.)[3]))) %>%
   ggplot(aes(color = pred_prob)) +
   geom_segment(aes(x = pred_prob - 1.96*SE, xend = pred_prob + 1.96*SE, 
                    y = rank_id, yend = rank_id),
@@ -534,16 +547,52 @@ ecdf.pltDat %>%
   theme(axis.text.x = element_text(size = 16)) +
   theme(strip.text = element_text(size = 18)) +
   theme(axis.title.x = element_text(size = 20)) +
-  guides(color = guide_colorbar(title = 'Probability',
+  theme(axis.title.y = element_text(size = 20)) +
+  guides(color = guide_colorbar(title = 'Predicted\nProbability',
                                 title.theme = element_text(size= 20),
                                 label.theme = element_text(size= 16),
                                 barwidth = 3, barheight = 12)) +
-  ggtitle("Predicted Probabilities of Early-Life Institutional Care for each Group, from each Model") +
-  xlab('Probability') +
-  ylab('Cumalitive Distribution')
+  ggtitle("Range of Predicted Probabilities for Participants in each Group, by each Model") +
+  xlab('Distribution of Predicted Probabilities that a subject is PI group, ordered from lowest to highest') +
+  ylab('Cumulative Percent of Subjects Plotted')
 ggsave("../results/ecdf_plot.jpg", device = 'jpg', units = 'in', height = 10, width = 22)
+ggsave("~/DANL/MastersResearch/results/ecdf_plot.jpg", 
+       device = 'jpg', units = 'in', height = 10, width = 22)
 ```
 
+ecdf as density plots
+```{r}
+ecdf.pltDat %>%
+  arrange(pred_prob) %>%
+  #mutate_at('IDENT_SUBID', ~factor(., levels = unique(.))) %>%
+  group_by(GROUP, pipeline, preproc) %>%
+  mutate(rank_id = 100*(dense_rank(pred_prob) / n())) %>% ungroup %>%
+  mutate_at(vars(GROUP), ~factor(c("Comp", "PI")[. + 1], levels = c("PI", "Comp"))) %>%
+  mutate_at(vars(pipeline, preproc), ~case_when(
+    grepl("Unadjusted$", .) ~ sub("[[:punct:]]", "", sub("Unadjusted", ": No Covariates", .)),
+    grepl("AllAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AllAdjusted", ": All Covariates", .)),
+    grepl("AgeSexAdjusted$", .) ~ sub("[[:punct:]]", "", sub("AgeSexAdjusted", ": Age, Sex Controlled for", .))
+  )) %>%
+  mutate_at('preproc', ~factor(., levels = c(unique(.)[2], unique(.)[1], unique(.)[3]))) %>%
+  ggplot(aes(color = pred_prob)) +
+  geom_density(aes(pred_prob, fill = GROUP), alpha = .7) +
+  facet_grid(rows = vars(model), cols = vars(preproc)) +
+  my_theme +
+  theme(axis.text.y = element_text(size = 14)) +
+  theme(axis.text.x = element_text(size = 16)) +
+  theme(strip.text = element_text(size = 18)) +
+  theme(axis.title.x = element_text(size = 20)) +
+  theme(axis.title.y = element_text(size = 20)) +
+  guides(color = guide_colorbar(title = 'Predicted\nProbability',
+                                title.theme = element_text(size= 20),
+                                label.theme = element_text(size= 16),
+                                barwidth = 3, barheight = 12)) +
+  ggtitle("Range of Predicted Probabilities for Participants in each Group, by each Model") +
+  xlab('Predicted Probability that a Participant Belongs to the PI Group') +
+  ylab('Cumulative Percent of Subjects Plotted')
+ggsave("../results/density_plot.jpg", device = 'jpg', units = 'in', height = 10, width = 22)
+ggsave("~/DANL/MastersResearch/results/density_plot.jpg", device = 'jpg', units = 'in', height = 10, width = 22)
+```
 
 
 # Distribution of AUC for each model fit with the different training samples
@@ -559,7 +608,7 @@ within_fold_performance <- map_dfr(keys, .f = ~{
 }) %>%
   mutate(x_axis = paste(model, preproc, sep = '_'))
 
-# And the actual, averaged resuls
+# And the actual, averaged results
 average_performance <- map_dfr(keys, .f = ~{
   gbm <- map_dfr(pluck(res_list, paste0('GBM_', .x)), # Returns a list, one for each resample
                 function(x) x$Observed$Model$Predictions) %>%
@@ -582,6 +631,10 @@ saveRDS(list(
   'within' = within_fold_performance,
   'averaged' = average_performance
 ), '../results/within_and_averaged_performance.rds')
+```
+```{r}
+within_fold_performance <- readRDS("../results/within_and_averaged_performance.rds")$within
+average_performance <- readRDS("../results/within_and_averaged_performance.rds")$average
 ```
 
 
@@ -774,6 +827,8 @@ model_pvals = map_dfr(paste(rep(c('GBM','GLM'), each = 3), keys, sep='_'), ~{
        x_axis = .x)
 })
 saveRDS(model_pvals, "../results/model_perm_pvalues.rds")
+model_pvals = readRDS("../results/model_perm_pvalues.rds")
+readRDS("../results/model_perm_pvalues.rds")
 ```
 
 # Plots of both
@@ -804,6 +859,7 @@ performance.pltDat <- rbind(
   #   assign("performance.pltDat", ., pos = .GlobalEnv)
   #   .
   # } %>%
+saveRDS(performance.pltDat,"../results/performance.pltDat.rds")
 ```
 ```{r}
 # Plot
@@ -868,6 +924,74 @@ ggplot(performance.pltDat, aes(x = model)) +
   xlab('Model Type') + ylab('ROCAUC')
 ggsave("../results/PerformancePlotFinal.jpg", device = 'jpg', units = 'in',
        width = 11*1.7, height = 8*1.7)
+```
+
+
+## New perf plot with ONLY averaged results
+```{r}
+performance.pltDat_ave = performance.pltDat %>% filter(Results_type == "Averaged Results")
+ggplot(performance.pltDat_ave, aes(x = model)) +
+  # Layer 1 are boxplots for both averaged and individual
+  geom_boxplot(aes(y = i_rocauc), size = 2, color = 'black') + 
+  geom_boxplot(aes(y = boot_rocauc), size = 2, color = 'black') +
+  # Null distributions
+  geom_jitter(aes(y = nulls), shape = 21, color = '#838383', fill='white', # dark, dark grey 
+              alpha = .5, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = nulls),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # The jitters for the bootstraps, plus the linerange/errorbar
+  geom_jitter(aes(y = boot_rocauc, color = preproc, shape = model), fill = 'white', 
+              alpha = .3, width = .25, stroke = 2.2, size = 2.2, height = .01) +
+  stat_summary(inherit.aes = T, aes(y = boot_rocauc),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Add the jitters and errorband for the individual-fold results
+  geom_jitter(aes(y = i_rocauc, color = preproc, shape = model), fill = 'white',
+              width = .15, size = 3.2, stroke = 2.2, alpha = .5) +
+  stat_summary(inherit.aes = T, aes(y = i_rocauc),
+               fun.min = ~quantile(., probs = .025, na.rm = T),
+               fun.max = ~quantile(., probs = .975, na.rm = T),
+               geom = 'errorbar', color = 'red', width = .1, size = 1.5) +
+  # Facetting
+  facet_grid(cols = vars(preproc), labeller = labeller(
+    .cols = setNames(
+      object = paste('Covariates:', c('None','Age, Sex', 'Age, Sex, ICV')),
+      nm = sort(unique(performance.pltDat_ave$preproc))))) +
+  # Relabelling the legends
+  scale_shape_manual(values = c(22, 23), labels = c('GBM','Logistic Regression')) +
+  scale_x_discrete(labels = c('GBM', 'Logistic\nRegression')) +
+  guides('shape' = guide_legend(title = 'Model Type',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  theme(legend.key.height = unit(2, 'cm')) +
+  scale_color_manual(values = jet.colors(5)[c(2, 4, 3)],
+                     labels = c('None','Age, Sex', 'Age, Sex, ICV')) +
+  guides('color' = guide_legend(title = 'Covariates\nControlled',
+                                override.aes = list(alpha = 1),
+                                title.theme = element_text(size = 20),
+                                label.theme = element_text(size = 19))) +
+  # apply the theme defined in the first code chunk of this .Rmd
+  my_theme +
+  # FINAL LAYER: average for each the bootstraps (is really the averaged result)
+  # and the mean of the individual fold results
+  # Add the point for each mean (since boxplot demarcates median)
+  stat_summary(aes(y = ALL_rocauc), inherit.aes = T, fun = mean, geom = 'point',
+               shape = 21, size = 4, fill = 'white', color = 'black', stroke = 3) +
+  theme(
+    strip.text.x = element_text(size = 24),
+    strip.text.y = element_text(size = 20),
+    axis.text.x = element_text(size = 24),
+    axis.title.x = element_text(size = 28)
+  ) +
+  xlab('Model Type') + ylab('Accuracy (ROCAUC)') +
+  ggtitle('Accuracy identifying groups in the test data') +
+  theme(plot.title = element_text(hjust = .5))
+ggsave("../results/AveragedPerformancePlot.jpg", device = 'jpg', units = 'in',
+       width = 11*1.7, height = 5.6*1.7)
 ```
 
 ## Plots for the D stat
