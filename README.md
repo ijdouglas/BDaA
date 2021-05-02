@@ -8,15 +8,16 @@ All scripts source the file `functions.R` (in `scripts/FINAL`)
 
 **I.** The indices of the train-test-tune splits of the data were created with:
 
-- `split_data.R` (creating the file `splits.csv` contained in `data/FINAL`)
-- In reality, `split_data.R` is run twice:
--     Once to split the younger SB sample
--     Once to split the older SB sample.
-- Older and younger samples for both SB and ELFK are defined as follows:
--     1. Compute the `floor()` of every subject's age.
--     2. Compute the median (floor of) the age vector in SB
--     3. Younger {SB, ELFK} samples are those whose (floored) age is `<=` median (floored) SB age.
--     4. Older {SB, ELFK} samples are those with a floored age `>` median (floored) SB age.
+```split_data.R #creating the file data/splits.csv contained in data)```
+
+* In reality, `split_data.R` is run twice:
+    * Once to split the SB younger subsample (output file: `data/younger.splits.csv`)
+    * Once to split the SB olders ubsample (output file: `data/younger.splits.csv`)
+* Older and younger samples for both SB and ELFK are defined as follows:
+    1. Compute the `floor()` of every subject's age.
+    2. Compute the median (floor of) the age vector in **ELFK**
+    3. Younger {SB, ELFK} samples are those whose (floored) age is `<=` median (floored) **ELFK** age.
+    4. Older {SB, ELFK} samples are those with a floored age `>` median (floored) **ELFK** age.
 
 **II.** After splitting the data by age, the following scripts conduct analyses:
 
