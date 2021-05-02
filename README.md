@@ -12,7 +12,7 @@ All scripts source the file `functions.R` (in `scripts/FINAL`)
 
 * In reality, `split_data.R` is run twice:
     * Once to split the SB younger subsample (output file: `data/younger.splits.csv`)
-    * Once to split the SB olders ubsample (output file: `data/younger.splits.csv`)
+    * Once to split the SB older subsample (output file: `data/older.splits.csv`)
 * Older and younger samples for both SB and ELFK are defined as follows:
     1. Compute the `floor()` of every subject's age.
     2. Compute the median (floor of) the age vector in **ELFK**
