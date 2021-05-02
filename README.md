@@ -19,6 +19,8 @@ All scripts source the file `functions.R` (in `scripts/FINAL`)
     3. Younger {SB, ELFK} samples are those whose (floored) age is `<=` median (floored) **ELFK** age.
     4. Older {SB, ELFK} samples are those with a floored age `>` median (floored) **ELFK** age.
 
+*Note. Median (floored) age in the ELFK sample is 11 (N = 68).*
+
 **II.** After splitting the data by age, the following scripts conduct analyses:
 
 - `02-sb-GBM-CVPVI_unadjusted_older.R`: this script reads in the older {SB, ELFK} data for {training, testing} gradient boosting models
