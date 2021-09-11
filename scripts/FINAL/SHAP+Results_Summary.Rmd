@@ -1,0 +1,1053 @@
+---
+title: "SHAP+Results_Summary"
+author: "Ian Douglas"
+date: "6/3/2021"
+output: html_document
+---
+```{r, message=F, warning=F, results='hide'}
+set.seed(1234)
+# Load packages ----
+suppressPackageStartupMessages(library(tidyverse))
+library(magrittr) # for `%<>%`
+library(broom) # for `tidy()`
+library(MLmetrics)
+library(parallel)
+library(gridExtra)
+library(data.table)
+library(car)
+```
+```{r}
+source('functions.R')
+# Some additional functions and variables:
+# To fit the confound regressions (with known variable names, etc)
+fit_glm = function(.dat)
+{
+  glm(GROUP ~ age + sex + ICV + pred_prob, data = .dat, family = 'quasibinomial')
+}
+# Calculate the mean, but drop any 0's 
+## (for aggregating variable importance which is 0 if the model doesn't use a variable)
+mean_drop0 = function(x, ...) mean(x[x != 0], ...)
+# And create an alias for dplyr::select
+Select = function(.d, ...) {dplyr::select(.d, ...)}
+# Reformat one function so it takes y_pred and group labels as args: ----
+d_stat = function(probs, group)
+{
+  if (all(group %in% 0:1)) {
+    .grp = group
+  } else .grp <- as.numeric(as.factor(group)) - 1 # convert to 0 and 1
+  out <- suppressWarnings(ks.test(probs[.grp == 1], probs[.grp == 0])$statistic)
+  out
+}
+# A slightly different version to allow for slightly different inputs
+D_STAT = function(.y_pred, .factor)
+{
+  suppressWarnings(ks.test(.y_pred[.factor == 1], .y_pred[.factor == 0])$stat)
+}
+# Define some functions to read data in seamlessly from box ----
+box_path = '~/Box/Research/DANL/SB'
+readRDS.box = function(file, ...) {
+  readRDS(Sys.glob(file.path(box_path, file)), ...)
+}
+saveRDS.box = function(object, file, ...) {
+  saveRDS(object, file.path(box_path, file), ...)
+}
+read_csv.box = function(file, ...) {
+  read_csv(Sys.glob(file.path(box_path, file)), ...)
+}
+write.csv.box = function(object, file, ...) {
+  write.csv(object, file.path(box_path, file), ...)
+}
+# Create a theme for plotting ----
+my_theme = theme(panel.border = element_rect(color = 'black', fill = NA, size = .9),
+                panel.background = element_rect(color = 'black', fill = 'white'),
+                panel.grid = element_line(color = 'lightgrey', size = .2),
+                plot.background = element_rect(color = 'white', fill = 'white'),
+                #axis.text.x = element_blank(),
+                #axis.ticks.x = element_blank(),
+                plot.title = element_text(hjust = .5, size = 36),
+                plot.title.position = 'plot',
+                axis.text.y = element_text(size = 30),
+                axis.title.y = element_text(size = 33))
+# NOTE: you could set the theme for the markdown as follows:
+# (rather than doing `ggplot() + geom_*() + my_theme`)
+# theme_set(theme(panel.border = element_rect(color = 'black', fill = NA, size = .9), 
+#                 panel.background = element_rect(color = 'black', fill = 'white'), 
+#                 panel.grid = element_line(color = 'lightgrey', size = .2), 
+#                 plot.background = element_rect(color = 'white', fill = 'white'), 
+#                 #axis.text.x = element_blank(), 
+#                 #axis.ticks.x = element_blank(), 
+#                 plot.title = element_text(hjust = .5, size = 36), 
+#                 plot.title.position = 'plot',
+#                 axis.text.y = element_text(size = 30),
+#                 axis.title.y = element_text(size = 33)))
+
+# Set up jet palette ----
+jet.colors <- colorRampPalette(rev(c("#00007F", "blue", "#007FFF", "cyan", "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000")))
+# Test jet palette
+sapply(1:100, function(x) rnorm(100, mean = x, sd = 1)) %>%
+  as.data.frame %>%
+  pivot_longer(everything()) %>%
+  mutate(name = name %>% str_extract('[[:digit:]]+') %>% as.numeric) %>%
+  arrange(name) %>%
+  ggplot() + 
+  geom_density(aes(x = value, fill = as.factor(name)), show.legend = F, alpha = .6, color=NA) +
+  scale_fill_manual(values = jet.colors(100)) + 
+  my_theme # and testing out the custom theme
+```
+
+
+# Read in the test data to pull original feature and covariate values
+```{r}
+SB = readRDS.box('data/SB.rds')
+sb.young = readRDS.box("data/younger.SB.rds")
+sb.old = readRDS.box("data/older.SB.rds")
+elfk.young = readRDS.box("data/younger.ELFK.rds") # IFC already dropped
+elfk.old = readRDS.box("data/older.ELFK.rds") # IFC already dropped
+elfk.both = rbind(elfk.young, elfk.old) %>% mutate(model_num = 0)
+# Useful shortcut: create a global env variable with the brain feature names only
+BRAIN = elfk.both %>% Select(starts_with(c('L.', 'R.'))) %>% names
+# Reorder the columns in elfk.both
+elfk.both = cbind(elfk.both %>% Select(-all_of(BRAIN)), elfk.both %>% Select(all_of(BRAIN)))
+names(elfk.both)
+```
+
+# Read in the results, fit comparison models
+
+
+1. The first set are age-stratified models for which we computed SHAP values
+2. The fourth are gbm/glm models, not age stratified, for which we compute SHAP values.
+    - Note that the glm models also produce beta coefficients (but the train is balanced)
+    - Note that this is the only set that we would extract information about the train models
+3. The second set are age-stratified models for which we computed CVPVI
+4. The third set are not age stratified model, for which we computed CVPVI
+5. For comparison, fit a multiple regression with the full, unbalanced data; adjust for multiple comparison
+     - Note that this is similar to the gl models from step 2, however the full unbalanced data is used.
+6. Finally, fit a mass univariate test of association with group in the unbalanced data; adjust for multiple comparisons
+```{r}
+# First set of models, using age stratification and evaluating features using SHAP ----
+ageStrat_SHAP.list = list(
+  gbm_young = readRDS.box("results/age_stratified/SB-GBM-shap_unadjusted-younger_2021-05-17.rds"),
+  gbm_old = readRDS.box("results/age_stratified/SB-GBM-shap_unadjusted-older_2021-05-17.rds"),
+  glm_young = readRDS.box("results/age_stratified/SB-LogReg-shap_unadjusted-younger_2021-05-17.rds"),
+  glm_old = readRDS.box("results/age_stratified/SB-LogReg-shap_unadjusted-older_2021-05-17.rds")
+)
+# Second set: ----
+allAge_SHAP.list = list(
+  gbm.all_age.shap = readRDS.box('results/age_combined/GBM_shap_AllAgesUnadjusted_2021-06-14.rds'),
+  glm.all_age.shap = readRDS.box('results/age_combined/LogReg_shap_AllAgesUnadjusted_2021-06-14.rds')
+)
+# For second bullet point of #2, these will be the individual models at each iteration.
+## They are fit with all brain features, and balanced data. 
+## We just score them individually below, rather than stacked.
+## As such, we don't read in another set of models of this type.
+
+# Third set (models are replicated identically, but features evaluated using CVPVI ----
+ageStrat_CVPVI.list = list(
+  gbm.cvpvi.y = readRDS.box("results/age_stratified/SB-GBM-CVPVI_unadjusted-younger_2021-05-02.rds"),
+  gbm.cvpvi.o = readRDS.box("results/age_stratified/SB-GBM-CVPVI_unadjusted-older_2021-05-02.rds"),
+  glm.cvpvi.y = readRDS.box("results/age_stratified/SB-LogReg-CVPVI_unadjusted-younger_2021-05-02.rds"),
+  glm.cvpvi.o = readRDS.box("results/age_stratified/SB-LogReg-CVPVI_unadjusted-older_2021-05-02.rds")
+)
+
+# Fourth set: models fit (and scored) on all-age-inclusive train (or test) data (no stratification) ----
+allAge_CVPVI.list = list(
+  gbm.all_age.cvpvi = readRDS.box('results/age_combined/SB-GBM_CVPVI_ADJUSTNOTHING_2021-01-12.rds'),
+  glm.all_age.cvpvi = readRDS.box('results/age_combined/SB-LogReg-CVPVI_ADJUSTNOTHING_2021-01-12.rds')
+)
+
+# Details about the fifth and sixth models described above:
+## 5th: For the fifth model (GLM only), it is a multiple regression using the SB data, unbalanced.
+## 6th: We fit many OLS regressions in "mass univariate" fashion (full sample SB, unbalanced data).
+## Note for both, unbalanced means not creating equal PI-COMP train data (full data implies not-age-stratified)
+# Define a quick hlper function to extract predicted probabilities from a logistic regression
+logistic_pred_prob = function(object, newdata) predict(object, newdata, type = 'resp')
+## Fitting the 5th model type:
+full_SB_GLM = glm(GROUP ~ .-subjWeight,
+                  weights = subjWeight, 
+                  data = get_design(SB) %>% mutate(IDENT_SUBID = NULL),
+                  family = 'quasibinomial')
+#### Score and adjust pvalues for the 5th model:
+table.full_SB_GLM = full_SB_GLM %>%
+  {
+    tmp <- .
+    cross_val_AUC = AUC(predict(., elfk.both %>% mutate(IDENT_SUBID = NULL), 
+                                  type = 'resp'), elfk.both$GROUP)
+    cross_val_D = d_stat(predict(., elfk.both %>% mutate(IDENT_SUBID = NULL), 
+                                  type = 'resp'), elfk.both$GROUP)
+    tmp %>% tidy %>% slice(-1) %>% 
+      mutate(cross_val_AUC = cross_val_AUC,
+             cross_val_D = cross_val_D,
+             p.fdr.adjusted = p.adjust(p.value, method = 'fdr'),
+             p.bonf.adjusted = p.adjust(p.value, method = 'bonf'))
+  } %>%
+  # Now conduct the permutation tests for the AUC and D of each models
+  mutate(
+    AUC_perm_pvalue = permutation_test(.model= full_SB_GLM, 
+                                       .new_X = elfk.both %>% select(-IDENT_SUBID),
+                                       .new_y = elfk.both$GROUP,
+                                       pred_func = logistic_pred_prob,
+                                       scoring_func = AUC,
+                                       R = 10000, 
+                                       maximize = T,
+                                       return_all = F),
+    D_perm_pvalue = permutation_test(.model= full_SB_GLM, 
+                                     .new_X = elfk.both %>% select(-IDENT_SUBID),
+                                     .new_y = elfk.both$GROUP,
+                                     pred_func = logistic_pred_prob,
+                                     scoring_func = d_stat,
+                                     R = 10000, 
+                                     maximize = T,
+                                     return_all = F)
+  ) %>%
+  # Reorder the columns so they make more sense
+  Select(term:p.value, ends_with('adjusted'), contains('AUC'), contains('D'))
+# Save it out
+write.csv.box(table.full_SB_GLM, "results/all/multipleLogisticRegResults.csv", row.names = F)
+
+## Fitting the 6th model:
+# And one more in mass univariate fashion (just save the parameter estimates in a table)
+mass_uni_mods = map_dfr(names(SB %>% select(starts_with(c('L.', 'R.')))), ~{
+  mod = glm(GROUP ~ .-subjWeight, family = 'quasibinomial', weights = subjWeight, 
+      data = SB[c('GROUP', 'subjWeight', .x)])
+  # Get the permutation pvalue for the AUC of each model:
+  auc_perm_pval = permutation_test(
+    .model = mod, .new_X = elfk.both %>% select(-IDENT_SUBID), .new_y = elfk.both$GROUP,
+    .cores = 3, R = 10000, parallel = T, 
+    pred_func = logistic_pred_prob,
+    scoring_func = AUC, return_all = F, maximize = T)
+  d_perm_pval = permutation_test(
+    .model = mod, .new_X = elfk.both %>% select(-IDENT_SUBID), .new_y = elfk.both$GROUP,
+    .cores = 3, R = 10000, parallel = T, 
+    pred_func = logistic_pred_prob,
+    scoring_func = d_stat, return_all = F, maximize = T)
+  cross_val_AUC = AUC(logistic_pred_prob(mod, elfk.both), elfk.both$GROUP)
+  cross_val_D = d_stat(logistic_pred_prob(mod, elfk.both), elfk.both$GROUP)
+  mod %>% tidy %>% slice(-1) %>% mutate(cross_val_AUC = cross_val_AUC,
+                                        cross_val_D = cross_val_D,
+                                        AUC_perm_pvalue = auc_perm_pval,
+                                        D_perm_pvalue = d_perm_pval)
+}) %>%
+  # compute and add column for multiple corrections
+  mutate(p.fdr.adjusted = p.adjust(p.value, 'fdr'),
+         p.bonf.adjusted = p.adjust(p.value, 'bonf')) %>%
+  mutate(significant_across_both_criteria = (p.fdr.adjusted < .05) & (p.bonf.adjusted < .05))
+mass_uni_mods %>%
+  mutate(brain_region = substr(term, 3, 99)) %>%
+  arrange(brain_region) %>%
+  mutate(brain_region = NULL) %>%
+  write.csv.box(., 'results/all/massUnivariateResults.csv', row.names = F)
+round3 = function(x) round(x, 3)
+mass_uni_mods %>%
+  mutate(brain_region = substr(term, 3, 99)) %>%
+  arrange(brain_region) %>%
+  mutate(brain_region = NULL, p.bonf.adjusted = round3(p.bonf.adjusted),
+         estimate = round(estimate*1000, 2), AUC = round3(cross_val_AUC), D = round3(cross_val_D),
+         auc.perm.p = round3(AUC_perm_pvalue), D.perm.p = round3(D_perm_pvalue)
+  ) %>% 
+  Select(term, estimate, p.bonf.adjusted, AUC, auc.perm.p, D, D.perm.p) %>%
+  mutate(auc_bonf_adjust = p.adjust(auc.perm.p, 'bonf'),
+         D_bonf_adjust = p.adjust(D.perm.p, 'bonf')) %>%
+  rowwise() %>%
+  mutate(Coef_p = paste0(estimate, 'e-3 (', p.bonf.adjusted,')'), 
+         AUC_p = paste0(AUC, ' (', auc_bonf_adjust, ')'),
+         D_p = paste0(D, ' (', D_bonf_adjust, ')')) %>%
+  Select(term, Coef_p, AUC_p, D_p) %>%
+  write.csv.box('results/all/EXCEL_TABLE.csv', row.names = F)
+mass_uni_mods
+```
+
+
+# Quick Detour: Extract Descriptive statistics about training data
+```{r}
+train_descriptives = list()
+train_descriptives$ageStrat = ageStrat_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    imap_dfr(res_n_of_4, .f = ~{
+      if (mod_type == 'gbm') {
+        ti = .x$data$train.indices
+        tf = .x$data$trainfrac
+        i = ti[1:(length(ti)*tf)]
+      } else i = .x$data$train.indices
+      SB[i, ] %>%
+        mutate(across(GENDER_FEMALE, ~as.numeric(as.character(.)))) %>%
+        group_by(GROUP) %>%
+        summarise(.groups = 'drop',
+                  across(.cols = c(brain_age_yrs, GENDER_FEMALE), 
+                         .fns = list('mean'=mean, 'median'=median, 'min'=min, 'max'=max),
+                         .names = "{.fn}.{.col}"),
+            N = n()) %>%
+        mutate(mod_type = mod_type, pipeline = 'age stratification', iteration = .y) %>%
+        Select(mod_type, pipeline, iteration, everything())
+    })
+  })
+train_descriptives$allAge = allAge_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_2, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    imap_dfr(res_n_of_2, .f = ~{
+      if (mod_type == 'gbm') {
+        ti = .x$data$train.indices
+        tf = .x$data$trainfrac
+        i = ti[1:(length(ti)*tf)]
+      } else i = .x$data$train.indices
+      SB[i, ] %>%
+        mutate(across(GENDER_FEMALE, ~as.numeric(as.character(.)))) %>%
+        group_by(GROUP) %>%
+        summarise(.groups = 'drop',
+                  across(.cols = c(brain_age_yrs, GENDER_FEMALE), 
+                         .fns = list('mean'=mean, 'median'=median, 'min'=min, 'max'=max),
+                         .names = "{.fn}.{.col}"),
+            N = n()) %>%
+        mutate(mod_type = mod_type, pipeline = 'age stratification', iteration = .y) %>%
+        Select(mod_type, pipeline, iteration, everything())
+    })
+  })
+view(train_descriptives$ageStrat)
+```
+
+# Summarize results Part 1: SHAP values
+
+
+- Collect all of the SHAP values in long format, with labels: subj. ID, Variable,
+    - subj. ID
+    - Variable name
+    - Age group
+    - PI or COMP
+    - Model number
+- Calculate the percent of times that a variable has non-zero SHAP value
+- Calculate the Mean Absolute Shap Value for each brain feature, for different groups, and then overall
+```{r, message=F}
+# Non-zero shap value percents:
+# Note, these are all 1 for the GLM because each model fits a param for each IV
+# age stratification:
+ageStrat.nonZeroSHAP.summaries = list()
+ageStrat.nonZeroSHAP.summaries$raw = ageStrat_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    age_grp = str_extract(res_nm, 'young|old') # from the name of the results in the list
+    imap_dfr(res_n_of_4, .f = ~{.x$Observed$Importance[-1] %>% 
+        summarise(across(everything(), ~as.numeric(sum(.) != 0))) %>%
+        mutate(mod_type = mod_type, age_grp = age_grp) %>%
+        Select(mod_type, age_grp, everything())}) # returned
+  }) %>%
+  filter(mod_type == 'gbm')
+ageStrat.nonZeroSHAP.summaries$table = ageStrat.nonZeroSHAP.summaries$raw %>%
+  group_by(mod_type, age_grp) %>%
+  summarise(across(everything(), mean))
+# no stratification:
+allAge.nonZeroSHAP.summaries = list()
+allAge.nonZeroSHAP.summaries$raw = allAge_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    imap_dfr(res_n_of_4, .f = ~{.x$Observed$Importance[-1] %>% 
+        summarise(across(everything(), ~as.numeric(sum(.) != 0))) %>%
+        mutate(mod_type = mod_type) %>%
+        Select(mod_type, everything())}) # returned
+  }) %>%
+  filter(mod_type == 'gbm')
+allAge.nonZeroSHAP.summaries$table = allAge.nonZeroSHAP.summaries$raw %>%
+  group_by(mod_type) %>%
+  summarise(across(everything(), mean))
+# Both into a table for saving out result
+both.nonZeroSHAP.tbl = rbind(
+  tibble(pipeline = 'no stratification', 'age_grp' = 'both', allAge.nonZeroSHAP.summaries$table),
+  tibble(pipeline = 'age stratification', ageStrat.nonZeroSHAP.summaries$table)
+)
+write.csv.box(both.nonZeroSHAP.tbl, "results/all/nonZeroSHAP.summaries.csv", row.names = F)
+both.nonZeroSHAP.tbl %>%
+  pivot_longer(-pipeline:-mod_type, names_to = 'Variable', values_to = 'Proportion') %>%
+  pivot_wider(Variable, names_from = age_grp, values_from = Proportion) %>%
+  arrange(desc(both)) %>%
+  write.csv.box(., "results/all/EXCEL_PIVOT.nonZeroSHAP.summaries.csv", row.names = F)
+view(both.nonZeroSHAP.tbl)
+# Plot
+both.nonZeroSHAP.tbl %>%
+  pivot_longer(starts_with(c('L.', 'R.')), names_to = 'Variable', values_to = 'proportion') %>% 
+  ungroup %>% arrange(desc(proportion)) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable)))) %>%
+  ggplot() +
+  geom_point(aes(proportion, Variable)) +
+  facet_grid(cols = vars(age_grp)) + my_theme
+ggsave('nonZeroSHAP.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+# Results set 1 (SHAP values) and plot:
+ageStrat_SHAP.results = list()
+# Just the model and its performance (each of the 100 for each type)
+ageStrat_SHAP.results$model_performances = ageStrat_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    age_grp = str_extract(res_nm, 'young|old') # from the name of the results in the list
+    imap_dfr(res_n_of_4, .f = ~{.x$Observed$Model$Scores %>% mutate(model_number = .y)}) %>%
+      mutate(mod_type = mod_type, age_grp = age_grp) %>%
+      Select(model_number, mod_type, age_grp, everything())
+  })
+ageStrat_SHAP.results$all = ageStrat_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    age_grp = str_extract(res_nm, 'young|old') # from the name of the results in the list
+    imap_dfr(res_n_of_4, .f = ~{.x$Observed$Importance %>% mutate(model_number = .y)}) %>%
+      # merge in the subject's group labels
+      left_join(res_n_of_4[[1]]$Observed$Model$Predictions %>% Select(IDENT_SUBID, GROUP, GENDER_FEMALE, ICV)) %>%
+      mutate(mod_type = mod_type, age_grp = age_grp) %>%
+      Select(IDENT_SUBID, GROUP:ICV, mod_type, age_grp, model_number, everything())
+  })
+## For the first summary, take the mean absolute SHAP value globally
+# In order to take the mean across the models, we z-score the mean abs. shap vlaues w/in each model (btwn variables)
+ageStrat_SHAP.results$meanAbsSHAP_zscoreEnsemble = ageStrat_SHAP.results$all %>%
+  # Collapse across subjects within each model:
+  group_by(mod_type, model_number) %>%
+  summarise(across(BRAIN, ~mean(abs(.)))) %>%
+  # Now z-score within each model (between brain regions) and then average these
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  group_by(mod_type, model_number) %>%
+  mutate(SHAP = scale(SHAP)) %>%
+  # Now average the zscored absolute SHAPs for each variable, across models (not model type!)
+  group_by(mod_type, Variable) %>%
+  summarise(across(SHAP, mean), .groups = 'drop_last') %>%
+  arrange(desc(SHAP), .by_group = T) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable))))
+# Plot:
+ggplot(ageStrat_SHAP.results$meanAbsSHAP_zscoreEnsemble) +
+  geom_point(aes(SHAP, Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('meanAbsShap-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+ageStrat_SHAP.results$meanAbsSHAP_zscoreEnsemble %>% 
+  filter(mod_type == 'gbm') %>%
+  ggplot() +
+  geom_point(aes(SHAP, Variable)) +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('meanAbsShapGBM-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+```{r}
+# Next, group by partitions of interest like values of the response, and age
+ageStrat_SHAP.results$byGroup.meanAbsSHAP_zscoreEnsemble = ageStrat_SHAP.results$all %>%
+  # Collapse across subjects, within each model AND GROUP:
+  group_by(mod_type, model_number, GROUP) %>%
+  summarise(across(BRAIN, ~mean(abs(.)))) %>%
+  # Now z-score within each model (between brain regions) and then average these
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  group_by(mod_type, model_number, GROUP) %>%
+  mutate(SHAP = scale(SHAP)) %>%
+  # Now average the zscored absolute SHAPs for each variable, across models (not model type!)
+  group_by(mod_type, GROUP, Variable) %>%
+  summarise(across(SHAP, mean), .groups = 'drop_last') %>%
+  arrange(desc(abs(SHAP)), .by_group = T) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable))))
+# Repeat but group by age
+ageStrat_SHAP.results$byAgeStrata.meanAbsSHAP_zscoreEnsemble = ageStrat_SHAP.results$all %>%
+  # Collapse across subjects, within each model AND GROUP:
+  group_by(mod_type, model_number, age_grp) %>%
+  summarise(across(BRAIN, ~mean(abs(.)))) %>%
+  # Now z-score within each model (between brain regions) and then average these
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  group_by(mod_type, model_number, age_grp) %>%
+  mutate(SHAP = scale(SHAP)) %>%
+  # Now average the zscored absolute SHAPs for each variable, across models (not model type!)
+  group_by(mod_type, age_grp, Variable) %>%
+  summarise(across(SHAP, mean), .groups = 'drop_last') %>%
+  arrange(desc(abs(SHAP)), .by_group = T) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable))))
+## Plots
+ageStrat_SHAP.results$byGroup.meanAbsSHAP_zscoreEnsemble %>%
+  ggplot(., aes(SHAP, Variable)) +
+  geom_point() +
+  facet_grid(~mod_type*GROUP, scales = 'free') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('GroupSpecificMeanAbsShap-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+ageStrat_SHAP.results$byAgeStrata.meanAbsSHAP_zscoreEnsemble %>%
+  ggplot(., aes(SHAP, Variable)) +
+  geom_point() +
+  facet_grid(~mod_type*age_grp, scales = 'free') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('AgeSpecificMeanAbsShap-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+## Results set 2 (SHAP values), and plot:
+```{r}
+allAge_SHAP.results = list()
+# Just the model and its performance (each of the 100 for each type)
+allAge_SHAP.results$model_performances = rbind(
+  imap_dfr(allAge_SHAP.list$gbm.all_age.shap, ~.x$Observed$Model$Scores %>% 
+             mutate(model_number = .y, mod_type='glm')),
+  imap_dfr(allAge_SHAP.list$glm.all_age.shap, ~.x$Observed$Model$Scores %>% 
+             mutate(model_number = .y, mod_type='gbm'))
+)
+# Okay, now summarizing shap values
+allAge_SHAP.results$all = allAge_SHAP.list %>%
+  imap_dfr(.f = function(res_n_of_2, res_nm) {
+    mod_type = str_extract(res_nm, 'g.m') # from the name of the results in the list
+    all_shaps = imap_dfr(res_n_of_2, .f = ~{.x$Observed$Importance %>% mutate(model_number = .y)}) %>%
+      # merge in the subject's group labels
+      left_join(res_n_of_2[[1]]$Observed$Model$Predictions %>% Select(IDENT_SUBID, GROUP, GENDER_FEMALE, ICV)) %>%
+      mutate(mod_type = mod_type) %>%
+      Select(IDENT_SUBID, GROUP:ICV, mod_type, model_number, everything())
+  })
+## For the first summary, take the mean absolute SHAP value globally
+# In order to take the mean across the models, we z-score the mean abs. shap vlaues w/in each model (btwn variables)
+allAge_SHAP.results$meanAbsSHAP_zscoreEnsemble = allAge_SHAP.results$all %>%
+  # Collapse across subjects within each model:
+  group_by(mod_type, model_number) %>%
+  summarise(across(BRAIN, ~mean(abs(.)))) %>%
+  # Now z-score within each model (between brain regions) and then average these
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  group_by(mod_type, model_number) %>%
+  mutate(SHAP = scale(SHAP)) %>%
+  # Now average the zscored absolute SHAPs for each variable, across models (not model type!)
+  group_by(mod_type, Variable) %>%
+  summarise(across(SHAP, mean), .groups = 'drop_last') %>%
+  arrange(desc(SHAP), .by_group = T) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable))))
+# Plot:
+ggplot(allAge_SHAP.results$meanAbsSHAP_zscoreEnsemble) +
+  geom_point(aes(SHAP, Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('meanAbsShap-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+allAge_SHAP.results$meanAbsSHAP_zscoreEnsemble %>%
+  filter(mod_type == 'gbm') %>%
+  ggplot() +
+  geom_point(aes(SHAP, Variable)) +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('meanAbsShapGBM-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+## Results set 2 grouped SHAP summaries (response value only)
+```{r}
+allAge_SHAP.results$byGroup.meanAbsSHAP_zscoreEnsemble = allAge_SHAP.results$all %>%
+  # Collapse across subjects within each model:
+  group_by(mod_type, model_number, GROUP) %>%
+  summarise(across(BRAIN, ~mean(abs(.)))) %>%
+  # Now z-score within each model (between brain regions) and then average these
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  group_by(mod_type, model_number, GROUP) %>%
+  mutate(SHAP = scale(SHAP)) %>%
+  # Now average the zscored absolute SHAPs for each variable, across models (not model type!)
+  group_by(mod_type, GROUP, Variable) %>%
+  summarise(across(SHAP, mean), .groups = 'drop_last') %>%
+  arrange(desc(abs(SHAP)), .by_group = T) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable))))
+# Plot:
+ggplot(allAge_SHAP.results$byGroup.meanAbsSHAP_zscoreEnsemble) +
+  geom_point(aes(SHAP, Variable)) +
+  facet_grid(~mod_type*GROUP, scales = 'free') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + my_theme
+ggsave('GroupSpecificMeanAbsShap-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+## Results set 2 (beta coefficients & plot):
+```{r}
+allAge_Parameter.result = allAge_SHAP.list$glm.all_age.shap %>%
+  imap_dfr(~{.x$Observed$Model$param_estimates %>% mutate(model_number = .y)}) %>%
+  Select(model_number, everything())
+# Plot
+allAge_Parameter.result %>% 
+  filter(Variable != '(Intercept)') %>% 
+  group_by(Variable) %>%
+  mutate(average = mean(estimate)) %>%
+  ungroup() %>%
+  mutate(d.rank = dense_rank(abs(average))) %>% 
+  arrange(desc(d.rank)) %>%
+  mutate(Variable = factor(Variable, levels = rev(unique(Variable)))) %>%
+  ggplot() + 
+  geom_jitter(aes(x = estimate, y = Variable), height = .07, pch = 21, fill = NA, size = 3) + 
+  stat_summary(aes(x = estimate, y = Variable), fun = mean, color = 'red') +
+  geom_vline(aes(xintercept = 0), linetype = 2) + 
+  xlab('Beta Coefficients of Individual Models') + my_theme
+ggsave('BetaCoefficients-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+
+- Correlate SHAP values with feature values for each of these groupings
+```{r, message=F}
+# For model set #1 (age stratified)
+ageStrat.Corr.df = ageStrat_SHAP.results$all %>% 
+  Select(IDENT_SUBID, GROUP, mod_type, model_number, age_grp, all_of(BRAIN)) %>% 
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  left_join(y = elfk.both %>% 
+              # Merge in the grey-matter volume
+              Select(IDENT_SUBID, all_of(BRAIN)) %>%
+              pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'GMV'),
+            by = c('IDENT_SUBID', 'Variable'))
+
+# Now selectively group by different covariates and compute correlations
+# First no covariates, just the overall correlation blind to group (for each INDIVIDUAL model)
+ageStrat_SHAP.results$SHAP_Corr_Overall = ageStrat.Corr.df %>%
+  group_by(mod_type, Variable, model_number) %>%
+  summarise(rho = suppressWarnings(cor(SHAP, GMV, use = 'complete')))
+# Within each age group (for each INDIVIDUAL model)
+ageStrat_SHAP.results$SHAP_Corr_byAge = ageStrat.Corr.df %>%
+  group_by(mod_type, Variable, model_number, age_grp) %>%
+  summarise(rho = suppressWarnings(cor(SHAP, GMV, use = 'complete')))
+# Within each group of the response (for each INDIVIDUAL model)
+ageStrat_SHAP.results$SHAP_Corr_Overall.byGroup = ageStrat.Corr.df %>%
+  group_by(mod_type, Variable, model_number, GROUP) %>%
+  summarise(rho = suppressWarnings(cor(SHAP, GMV, use = 'complete')))
+# Plot these
+ageStrat_SHAP.results$SHAP_Corr_Overall %>%
+  group_by(Variable) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable), size = 3, pch = 21, fill = rgb(.1, .1, .1, alpha = .1), height = .1, size = 3) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  my_theme
+ggsave('SHAPCorrelationsBothGrp-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+# By Group (of response)
+ageStrat_SHAP.results$SHAP_Corr_Overall.byGroup %>%
+  group_by(Variable, GROUP) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable), size = 3, pch = 21, fill = rgb(.1, .1, .1, alpha = .1), height = .1, size = 3) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  facet_grid(~GROUP) + 
+  my_theme
+ggsave('GroupSpecificSHAPCorrelations-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+# By age
+ageStrat_SHAP.results$SHAP_Corr_byAge %>%
+  mutate(age_grp = paste0(age_grp, 'er')) %>%
+  group_by(Variable, age_grp) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable), size = 3, pch = 21, fill = rgb(.1, .1, .1, alpha = .1), height = .1, size = 3) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  facet_grid(~age_grp) + 
+  my_theme
+ggsave('AgeSpecificSHAPCorrelations-AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+# Correlations for the non-age-stratified models:
+```{r}
+# For model set #2 (those for which SHAP vals are plotted directly above)
+allAge.Corr.df = allAge_SHAP.results$all %>% 
+  Select(IDENT_SUBID, GROUP, mod_type, model_number, all_of(BRAIN)) %>% 
+  pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'SHAP') %>%
+  left_join(y = elfk.both %>% 
+              # Merge in the grey-matter volume
+              Select(IDENT_SUBID, all_of(BRAIN)) %>%
+              pivot_longer(all_of(BRAIN), names_to = 'Variable', values_to = 'GMV'),
+            by = c('IDENT_SUBID', 'Variable'))
+
+# Now selectively group by different covariates and compute correlations
+# First no covariates, just the overall correlation blind to group (for each INDIVIDUAL model)
+allAge_SHAP.results$SHAP_Corr_Overall = allAge.Corr.df %>%
+  group_by(mod_type, Variable, model_number) %>%
+  summarise(rho = suppressWarnings(cor(SHAP, GMV, use = 'complete')))
+# Within each group of the response (for each INDIVIDUAL model)
+allAge_SHAP.results$SHAP_Corr_Overall.byGroup = allAge.Corr.df %>%
+  group_by(mod_type, Variable, model_number, GROUP) %>%
+  summarise(rho = suppressWarnings(cor(SHAP, GMV, use = 'complete')))
+```
+```{r}
+# Plot these
+# NOTE; EXPERIMENTAL: this version adds a correlation between the performance of the model
+# and the strength of correlation between the shap values and the feature.
+allAge_SHAP.results$SHAP_Corr_Overall %>%
+  group_by(Variable) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  left_join(allAge_SHAP.results$model_performances, by = c('mod_type', 'model_number')) %>%
+  group_by(Variable) %>%
+  mutate(perf.corr = cor(rho, test_ROCAUC, use = 'complete')) %>%
+  ungroup() %>%
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable, fill = test_ROCAUC), size = 3, pch = 21, height = .2, size = 3, alpha = .8) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  stat_summary(aes(perf.corr, Variable), fun = function(y) mean(y, na.rm = T), color= 'blue', size = 1.3)+ 
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  scale_fill_viridis_c(option = 'B') +
+  my_theme
+
+# Okay, these are the real versions:
+allAge_SHAP.results$SHAP_Corr_Overall %>%
+  group_by(Variable) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  left_join(allAge_SHAP.results$model_performances, by = c('mod_type', 'model_number')) %>%
+  group_by(Variable) %>%
+  mutate(perf.corr = cor(rho, test_ROCAUC, use = 'complete')) %>%
+  ungroup() %>%
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable), size = 3, pch = 21, fill = rgb(.1, .1, .1, alpha = .1), height = .1, size = 3) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  my_theme
+ggsave('SHAPCorrelationsBothGrp-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+# By Group (of response)
+allAge_SHAP.results$SHAP_Corr_Overall.byGroup %>%
+  group_by(Variable, GROUP) %>%
+  mutate(mean_rho = mean(rho, na.rm = T)) %>%
+  ungroup %>%
+  mutate(d.rank = dense_rank(mean_rho)) %>%
+  arrange(abs(mean_rho)) %>%
+  mutate(Variable = factor(Variable, levels = unique(Variable))) %>% 
+  ggplot(.) +
+  geom_jitter(aes(rho, Variable), size = 3, pch = 21, fill = rgb(.1, .1, .1, alpha = .1), height = .1, size = 3) +
+  stat_summary(aes(rho, Variable), fun = function(y) mean(y, na.rm = T), color = 'red', size = 1.3) +
+  coord_cartesian(xlim =c(-1, 1), expand = c(1, 0)) +
+  facet_grid(~GROUP) + 
+  my_theme
+ggsave('GroupSpecificSHAPCorrelationsBothGrp-AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+# Compute the CVPVI summaries (results sets 3 and 4)
+```{r}
+# Set 3
+# 1. Simply collect and aggregate the predictions from each model, and after permuting each variable
+ageStrat_CVPVI.results = list()
+ageStrat_CVPVI.results$all_predictions = ageStrat_CVPVI.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    imap_dfr(res_n_of_4, ~{
+      cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID','pred_prob', 'GROUP')], 
+            .x$Observed$CVPVI)
+    }) %>%
+      mutate(mod_type = str_extract(res_nm, 'g.m'))
+  }) %>%
+  group_by(IDENT_SUBID, GROUP, mod_type) %>%
+  summarise(across(everything(), mean)) %>%
+  Select(id=IDENT_SUBID, pred_prob, GROUP, mod_type, everything())
+ageStrat_CVPVI.results$averaged_predictions = ageStrat_CVPVI.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    imap_dfr(res_n_of_4, ~{
+      cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID','pred_prob', 'GROUP')], 
+            .x$Observed$CVPVI)
+    }) %>%
+      mutate(mod_type = str_extract(res_nm, 'g.m'))
+  }) %>%
+  group_by(IDENT_SUBID, GROUP, mod_type) %>%
+  summarise(across(everything(), mean)) %>%
+  Select(id=IDENT_SUBID, pred_prob, GROUP, mod_type, everything())
+# 2. No compute the variable importances based on these ensemble predicted values
+# Compute the Ensemble Importance, as well as the permutation p-value for each
+ageStrat_CVPVI.results$EI_AUC = ageStrat_CVPVI.results$averaged_predictions %>%
+  group_by(mod_type) %>%
+  # First compute the ensemble auc
+  mutate(ensemble.auc = AUC(pred_prob, GROUP)) %>%
+  pivot_longer(cols = all_of(c(BRAIN)), names_to = 'Variable', values_to = 'val') %>%
+  group_by(mod_type, ensemble.auc, Variable) %>%
+  summarise(Importance = {100*((mean(ensemble.auc) - AUC(val, GROUP)) / mean(ensemble.auc))},
+            p.val = {
+              perms = sapply(1:10000, function(i) {
+                rand.group = sample(GROUP)
+                rand.e.auc = AUC(pred_prob, rand.group)
+                100*((rand.e.auc - AUC(val, rand.group)) / rand.e.auc)
+              })
+              (sum(perms > Importance) + 1) / (length(perms) + 1)
+            }) %>%
+  group_by(mod_type, ensemble.auc) %>%
+  arrange(Importance, .by_group = T) %>% 
+  mutate(Variable = factor(Variable, levels = unique(Variable)))
+# And for d-stat based importance:
+ageStrat_CVPVI.results$EI_D = ageStrat_CVPVI.results$averaged_predictions %>%
+  group_by(mod_type) %>%
+  # First compute the ensemble auc
+  mutate(ensemble.D = D_STAT(pred_prob, GROUP)) %>%
+  pivot_longer(cols = all_of(c(BRAIN)), names_to = 'Variable', values_to = 'val') %>%
+  group_by(mod_type, ensemble.D, Variable) %>%
+  summarise(Importance = {100*((mean(ensemble.D) - D_STAT(val, GROUP)) / mean(ensemble.D))},
+            p.val = {
+              perms = sapply(1:10000, function(i) {
+                rand.group = sample(GROUP)
+                rand.e.D = D_STAT(pred_prob, rand.group)
+                100*((rand.e.D - D_STAT(val, rand.group)) / rand.e.D)
+              })
+              (sum(perms > Importance) + 1) / (length(perms) + 1)
+            }) %>%
+  group_by(mod_type, ensemble.D) %>%
+  arrange(Importance, .by_group = T) %>% 
+  mutate(Variable = factor(Variable, levels = unique(Variable)))
+# Plot
+pluck(ageStrat_CVPVI.results, 'EI_AUC') %>%
+  mutate(lab. = case_when(p.val < .05 ~ "*", T ~ "")) %>%
+  ggplot() +
+  geom_point(aes(x = Importance, y = Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  ggtitle('AUC-Based Ensemble Importance of Age-Stratified Models') +
+  xlab('Percent change attributed to brain feature in model') + 
+  my_theme +
+  geom_text(aes(Importance, Variable, label = lab.), color = 'red', size = 7)
+ggsave('AUC-basedEI_BothGrp_AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+pluck(ageStrat_CVPVI.results, 'EI_D') %>%
+  mutate(lab. = case_when(p.val < .05 ~ "*", T ~ "")) %>%
+  ggplot() +
+  geom_point(aes(x = Importance, y = Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  ggtitle('Distance-Based Ensemble Importance of Age-Stratified Models') +
+  xlab('Percent change attributed to brain feature in model') + 
+  my_theme +
+  geom_text(aes(Importance, Variable, label = lab.), color = 'red', size = 7)
+ggsave('D-basedEI_BothGrp_AgeStratPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+```{r}
+# Set 4
+allAge_CVPVI.results = list()
+allAge_CVPVI.results$all_predictions = allAge_CVPVI.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    imap_dfr(res_n_of_4, ~{
+      cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID','pred_prob', 'GROUP')], 
+            .x$Observed$CVPVI)
+    }) %>%
+      mutate(mod_type = str_extract(res_nm, 'g.m'))
+  }) %>%
+  group_by(IDENT_SUBID, GROUP, mod_type) %>%
+  summarise(across(everything(), mean)) %>%
+  Select(id=IDENT_SUBID, pred_prob, GROUP, mod_type, everything())
+allAge_CVPVI.results$averaged_predictions = allAge_CVPVI.list %>%
+  imap_dfr(.f = function(res_n_of_4, res_nm) {
+    imap_dfr(res_n_of_4, ~{
+      cbind(.x$Observed$Model$Predictions[c('IDENT_SUBID','pred_prob', 'GROUP')], 
+            .x$Observed$CVPVI)
+    }) %>%
+      mutate(mod_type = str_extract(res_nm, 'g.m'))
+  }) %>%
+  group_by(IDENT_SUBID, GROUP, mod_type) %>%
+  summarise(across(everything(), mean)) %>%
+  Select(id=IDENT_SUBID, pred_prob, GROUP, mod_type, everything())
+# Compute the Ensemble Importance, as well as the permutation p-value for each
+allAge_CVPVI.results$EI_AUC = allAge_CVPVI.results$averaged_predictions %>%
+  group_by(mod_type) %>%
+  # First compute the ensemble auc
+  mutate(ensemble.auc = AUC(pred_prob, GROUP)) %>%
+  pivot_longer(cols = all_of(c(BRAIN)), names_to = 'Variable', values_to = 'val') %>%
+  group_by(mod_type, ensemble.auc, Variable) %>%
+  summarise(Importance = {100*((mean(ensemble.auc) - AUC(val, GROUP)) / mean(ensemble.auc))},
+            p.val = {
+              perms = sapply(1:10000, function(i) {
+                rand.group = sample(GROUP)
+                rand.e.auc = AUC(pred_prob, rand.group)
+                100*((rand.e.auc - AUC(val, rand.group)) / rand.e.auc)
+              })
+              (sum(perms > Importance) + 1) / (length(perms) + 1)
+            }) %>%
+  group_by(mod_type, ensemble.auc) %>%
+  arrange(Importance, .by_group = T) %>% 
+  mutate(Variable = factor(Variable, levels = unique(Variable)))
+# And the d-stat based importance
+allAge_CVPVI.results$EI_D = allAge_CVPVI.results$averaged_predictions %>%
+  group_by(mod_type) %>%
+  # First compute the ensemble auc
+  mutate(ensemble.D = D_STAT(pred_prob, GROUP)) %>%
+  pivot_longer(cols = all_of(c(BRAIN)), names_to = 'Variable', values_to = 'val') %>%
+  group_by(mod_type, ensemble.D, Variable) %>%
+  summarise(Importance = {100*((mean(ensemble.D) - D_STAT(val, GROUP)) / mean(ensemble.D))},
+            p.val = {
+              perms = sapply(1:10000, function(i) {
+                rand.group = sample(GROUP)
+                rand.e.D = D_STAT(pred_prob, rand.group)
+                100*((rand.e.D - D_STAT(val, rand.group)) / rand.e.D)
+              })
+              (sum(perms > Importance) + 1) / (length(perms) + 1)
+            }) %>%
+  group_by(mod_type, ensemble.D) %>%
+  arrange(Importance, .by_group = T) %>% 
+  mutate(Variable = factor(Variable, levels = unique(Variable)))
+# Plot
+pluck(allAge_CVPVI.results, 'EI_AUC') %>%
+  mutate(lab. = case_when(p.val < .05 ~ "*", T ~ "")) %>%
+  ggplot() +
+  geom_point(aes(x = Importance, y = Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  ggtitle('AUC-Based Ensemble Importance of Age-Stratified Models') +
+  xlab('Percent change attributed to brain feature in model') + 
+  my_theme +
+  geom_text(aes(Importance, Variable, label = lab.), color = 'red')
+ggsave('AUC-basedEI_BothGrp_AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+# D-based:
+pluck(allAge_CVPVI.results, 'EI_D') %>%
+  mutate(lab. = case_when(p.val < .05 ~ "*", T ~ "")) %>%
+  ggplot() +
+  geom_point(aes(x = Importance, y = Variable)) +
+  facet_grid(~mod_type, scales = 'free') +
+  ggtitle('Distance-Based Ensemble Importance of Age-Stratified Models') +
+  xlab('Percent change attributed to brain feature in model') + 
+  my_theme +
+  geom_text(aes(Importance, Variable, label = lab.), color = 'red', size = 7)
+ggsave('D-basedEI_BothGrp_AllAgesPipeline.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+
+# Permutation tests of model performance
+
+* The models at each of the 100 iterations within either the age-stratified or 
+all age pipelines are the same regardless of whether ensemble importance is 
+computed or shap values. Below compute the permutation pvalue for the model performance for:
+
+  1. The age-stratified GBM
+  2. The age-stratified GLM
+  3. The non-age-stratified GBM
+  4. The non-age-stratified GLM
+```{r}
+permutation_tests = list(
+  'gbm_age_stratification' = ageStrat_CVPVI.results$averaged_predictions %>% ungroup,
+  'glm_age_stratification' = ageStrat_CVPVI.results$averaged_predictions %>% ungroup,
+  'gbm_no_stratification' = allAge_CVPVI.results$averaged_predictions %>% ungroup,
+  'glm_no_stratification' = allAge_CVPVI.results$averaged_predictions %>% ungroup
+)
+# Define a function to automate this process for all 4
+ptest = function(.obj, .y.) 
+{
+  .obj %>% 
+    filter(mod_type == str_extract(.y., 'g.m') %>% tolower) %>%
+    mutate(pipeline = str_replace(.y., 'g.m_', '')) %>%
+    group_by(mod_type, pipeline) %>%
+    summarise(ROCAUC = AUC(pred_prob, GROUP),
+              D = suppressWarnings(ks.test(pred_prob[GROUP == 1], pred_prob[GROUP == 0])$stat),
+              auc.p.val = {
+                permuted = sapply(1:10000, function(i) {AUC(pred_prob, sample(GROUP))})
+                (sum(permuted > ROCAUC) + 1) / (length(permuted) + 1)
+              },
+              d.p.val = {
+                permuted = sapply(1:10000, function(i) {
+                  suppressWarnings(ks.test(pred_prob[GROUP == 1], pred_prob[GROUP == 0])$stat)
+                })
+                (sum(permuted > D) + 1) / (length(permuted) + 1)
+              },
+              .groups='drop')
+}
+permutation_tests %<>% imap_dfr(ptest)
+# view results:
+#permutation_tests %>% rename(ensemble.auc = ROCAUC, ensemble.D = D)
+
+# Save the permutation tests
+permutation_tests %>% rename(ensemble.auc = ROCAUC, ensemble.D = D) %>%
+  write.csv.box(., 'results/all/performance_permutation_tests.csv', row.names = F)
+```
+
+# Next run the confound regressions
+```{r}
+conf_reg_df = rbind(ageStrat_CVPVI.results$averaged_predictions %>% mutate(pipeline = 'age_stratification'),
+      allAge_CVPVI.results$averaged_predictions %>% mutate(pipeline = 'no_stratification')) %>%
+  Select(id, pred_prob, GROUP, mod_type, pipeline) %>%
+  left_join(., elfk.both %>% Select(id=IDENT_SUBID, age=brain_age_yrs, ICV, sex=GENDER_FEMALE))
+
+# Fit models:
+conf_reg_tbl = conf_reg_df %>% 
+  as.data.table %>% 
+  data.table:::split.data.table(., by = c('mod_type', 'pipeline')) %>%
+  imap(~fit_glm(.x) %>% 
+         tidy %>% 
+         #slice(-1) %>% (to drop the intercept)
+         mutate(mod_type = str_extract(.y, 'g.m'),
+                pipeline = str_replace(.y, '^g.m\\.', ''))) %>%
+  reduce(rbind) %>%
+  Select(mod_type, pipeline, everything())
+
+# Save these results
+write.csv.box(conf_reg_tbl, 'results/all/confound_regressions.csv', row.names = F)
+
+
+# Also fit an ANOVA for each one
+conf_anova_tbl = conf_reg_df %>% 
+  as.data.table %>% 
+  data.table:::split.data.table(., by = c('mod_type', 'pipeline')) %>%
+  imap(~fit_glm(.x) %>% 
+         car::Anova(type = 'III') %>%
+         tidy %>% 
+         #slice(-1) %>% (to drop the intercept)
+         mutate(mod_type = str_extract(.y, 'g.m'),
+                pipeline = str_replace(.y, '^g.m\\.', ''))) %>%
+  reduce(rbind) %>%
+  Select(mod_type, pipeline, everything()) %>%
+  group_by(mod_type, pipeline) %>%
+  mutate(across(p.value, ~p.adjust(., method = 'fdr')))
+
+# Save the anova table
+write.csv.box(conf_anova_tbl, 'results/all/confound_anova.csv', row.names = F)
+```
+
+
+# Save all of the variable importances and permutation tests for respective models in `../results`
+```{r}
+final_results = rbind(
+  allAge_CVPVI.results[names(allAge_CVPVI.results) %>% grep('^EI', ., v = T)] %>%
+    imap(~.x %>% rename_at(c('Importance', 'p.val'), function(nm) paste0(nm, sub('EI', '', .y)))) %>%
+    reduce(merge) %>%
+    mutate(pipeline = 'no_stratification'),
+  ageStrat_CVPVI.results[names(ageStrat_CVPVI.results) %>% grep('^EI', ., v = T)] %>%
+    imap(~.x %>% rename_at(c('Importance', 'p.val'), function(nm) paste0(nm, sub('EI', '', .y)))) %>%
+    reduce(merge) %>%
+    mutate(pipeline = 'age_stratification')
+) %>%
+  Select(mod_type, pipeline, everything()) %>%
+  rename_at(vars(starts_with('p.val_')), ~paste0('imp.', .)) %>%
+  # Merge in the permutation tests
+  left_join(x = permutation_tests %>% rename(ensemble.auc = ROCAUC, ensemble.D = D), 
+            y = .)
+#view(final_results)
+write.csv.box(final_results, 'results/all/Performance+Importance_results+pvalues.csv', row.names = F)
+```
+
+# Save variable importance plots
+```{r}
+final_results %>%
+  mutate(
+    pipeline = str_replace(pipeline, '_', ' '),
+    `Model (Pipeline)` = as.factor(paste0(mod_type, " (", pipeline, ")")),
+    `Model (Pipeline)` = factor(`Model (Pipeline)`, levels = rev(levels(`Model (Pipeline)`)))
+  ) %>%
+  {
+    TMP_DAT <<- .
+    new_dat <- rbind(TMP_DAT %>% mutate(scaling = 'Actual %-Change'),
+          TMP_DAT %>% group_by(mod_type, pipeline) %>% 
+            mutate(Importance_AUC = scale(Importance_AUC), scaling = 'z-Scored') %>%
+            ungroup())
+    new_dat
+  } %>%
+  ggplot() +
+  geom_col(aes(y = Variable, x = Importance_AUC, fill = `Model (Pipeline)`), 
+           color = 'black', position = 'dodge') +
+  my_theme +
+  ggtitle("Importance of Each Variable to the Ensemble's Predictive Accuracy") +
+  theme(plot.title.position = 'plot',
+        plot.title = element_text(hjust = .5, size = 24),
+        axis.title.x = element_text(size = 18),
+        axis.title.y = element_text(size = 18),
+        axis.text.y = element_text(size = 18)) +
+  xlab('Change in ROCAUC') +
+  ylab('Brain Region') +
+  scale_fill_manual(values = scales::seq_gradient_pal("beige", "#0008FF")(seq(0,1,length.out=4))) +
+  guides('fill' = guide_legend(reverse = T)) +
+  facet_grid(~scaling, scales = 'free')
+ggsave('ei.auc.jpeg', plot=last_plot(), 'jpeg', file.path(box_path, 'results/plots'),
+       units = 'in', height = 8, width = 13.5)
+```
+```{r}
+library(beepr)
+beep()
+```
+
