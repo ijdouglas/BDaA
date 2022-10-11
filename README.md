@@ -1,4 +1,4 @@
-# MastersResearch
+# Brain Development after Adversity
 
 All scripts executed for this study are contained in this repo in the `scripts/FINAL` folder.
 
